@@ -24,7 +24,9 @@ export const AGENTS = {
     name: 'Codex',
     hint: 'Copy, then paste it into Codex.',
     prompt: `${start('FOWLBROWSER_SKIP_CLAUDE=1 sh install.sh')}\n` +
-      `3. Run \`codex mcp add fowlbrowser --env FOWLBROWSER_LABEL=Codex -- ${SERVER}\`.\n${load(4, 'Codex')}`,
+      `3. Run \`codex mcp add fowlbrowser --env FOWLBROWSER_LABEL=Codex -- ${SERVER}\`, then \`node tools/codex-hooks.mjs add\` in ~/FowlBrowser ` +
+      '(its hooks close your work tabs when each turn ends; tell me to trust them under /hooks).\n' +
+      `${load(4, 'Codex')}`,
   },
   other: {
     name: 'Other MCP clients',

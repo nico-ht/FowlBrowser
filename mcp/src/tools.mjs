@@ -14,7 +14,7 @@ import { registerPerf } from './perf.mjs';
 import { backgroundClick, openingLines, uninstallPopups } from './popups.mjs';
 import * as record from './record.mjs';
 import * as takeover from './takeover.mjs';
-import { callsByTab } from './turns.mjs';
+import { callsByTab, runTurnEnd } from './turns.mjs';
 import { isLocalUrl, sleep, tabInfo, within } from './util.mjs';
 import { clearViewport, MAX_SIZE, MIN_SIZE, setMedia, setViewport } from './viewport.mjs';
 import { cap as capText, collapseText, findInSnapshot, functionSource, mainFramePrefixes, maskFields, newRefState, numberRefs, playwrightRef, REF_PATTERN,
@@ -1900,6 +1900,17 @@ export function registerTools(server, manager) {
     { tab: tabArg }, simpleTabCall('tabs.keep', byId, 'Kept: handed to the user now (out of your work group) and stays open after your turn ends. You still control it until then; ' +
       'if it was muted it stays muted till then (tab_mute false if the user asked to hear it now).',
       { event: 'keep', toUser: true, escape: true }));
+  // Codex's Stop and SubagentStop hooks (tools/codex-hooks.mjs) call this over the session's own connection. Its text is
+  // the hook's output, so it is a Codex hook JSON object: {} or a warning naming the tabs that could not be cleaned up.
+  tool('turn_end',
+    'Run by Codex\'s turn-end hook, not by you: closes your work tabs (unless kept or opened for_user) and gives claimed and kept tabs back to the user. ' +
+    'To close or hand back a tab yourself, use tab_close, tab_release or tab_keep.',
+    {},
+    async () => {
+      const { errors = [] } = await runTurnEnd(manager);
+      const failed = errors.map(({ tab, error }) => `${tab}: ${error}`).join('; ');
+      return text(JSON.stringify(failed ? { systemMessage: `FowlBrowser could not clean up these tabs after the turn: ${failed}` } : {}));
+    });
   tool('tab_handoff',
     'Hand a tab to the user mid-task for something only they should do: logging in, a 2FA code, a CAPTCHA, payment or card details. ' +
     'Your cursor leaves, the tab leaves your group and is unmuted, and you stop acting in it (it is never brought to the front). ' +

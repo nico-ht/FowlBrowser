@@ -1,5 +1,6 @@
 // Turn-end cleanup (src/turns.mjs) against doubles: which tabs close, which go back to the user, which are skipped,
-// subagents deferring it, and the hook (bin/turn-ended.mjs) finding the socket of its first `claude` ancestor.
+// subagents deferring it, the hook (bin/turn-ended.mjs) finding the socket of its first `claude` ancestor, and the
+// turn_end tool Codex's hooks call.
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
@@ -127,6 +128,31 @@ test('tool calls count under "<browser>:<id>" however the tab id was typed', asy
   unblock({ relay: { model: { hasTab: () => false } }, tabs: new Map(), host: { request: async () => [] }, key: 'chrome' });
   await call;
   assert.equal(callsByTab.has('chrome:52'), false);
+});
+
+test('turn_end (Codex\'s hooks): cleans up like a turn end and answers as a hook, {} or a warning', async () => {
+  const handlers = {};
+  const register = (manager) => registerTools({ registerTool: (name, meta, handler) => { handlers[name] = handler; } }, manager);
+  const browser = fakeBrowser();
+  register(managerOf(browser));
+  const [first, concurrent] = await Promise.all([handlers.turn_end({}), handlers.turn_end({})]);
+  assert.deepEqual(first, { content: [{ type: 'text', text: '{}' }] });
+  assert.deepEqual(concurrent, first);
+  const removed = browser.calls.filter(([m]) => m === 'chrome.tabs.remove').map(([, [id]]) => id);
+  assert.deepEqual(removed.sort(), [1, 4, 8], 'unkept agent tabs close once: concurrent calls share one run');
+  const released = browser.calls.filter(([m]) => m === 'tabs.release').map(([, { tabId }]) => tabId);
+  assert.deepEqual(released.sort(), [2, 3, 6], 'kept and claimed tabs go back to the user');
+  assert.equal(browser.tabs.size, 0, 'the session keeps no tab');
+
+  const failing = fakeBrowser();
+  const request = failing.host.request;
+  failing.host.request = async (method, params) => {
+    if (method === 'tabs.release' && params.tabId === 3) throw new Error('boom');
+    return request(method, params);
+  };
+  register(managerOf(failing));
+  const { content: [{ text }] } = await handlers.turn_end({});
+  assert.deepEqual(JSON.parse(text), { systemMessage: 'FowlBrowser could not clean up these tabs after the turn: chrome:3: boom' });
 });
 
 test('an older extension without kept: handedOver decides, as before', async () => {

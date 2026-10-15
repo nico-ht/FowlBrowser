@@ -1,6 +1,6 @@
 #!/bin/sh
 # FowlBrowser uninstaller: removes what install.sh added (native host registrations, the Claude Code MCP server and
-# hooks, the app folder). The extension itself is removed by hand in each browser.
+# hooks, the Codex hooks, the app folder). The extension itself is removed by hand in each browser.
 set -eu
 SRC=$(cd "$(dirname "$0")" && pwd)
 APP="$HOME/Library/Application Support/FowlBrowser"
@@ -18,6 +18,9 @@ if [ "${FOWLBROWSER_SKIP_CLAUDE:-}" != 1 ]; then
   # Only hook entries running FowlBrowser's turn-ended.mjs go; everything else in the settings stays as it is.
   node "$SRC/tools/claude-hooks.mjs" remove "${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}" "$APP/mcp/bin/turn-ended.mjs"
 fi
+
+# Only FowlBrowser's turn_end hooks go from Codex's hooks.json; FOWLBROWSER_SKIP_CODEX=1 leaves them.
+[ "${FOWLBROWSER_SKIP_CODEX:-}" = 1 ] || node "$SRC/tools/codex-hooks.mjs" remove
 
 rm -rf "$APP"
 echo "Removed $APP"

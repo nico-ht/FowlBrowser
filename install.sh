@@ -1,7 +1,8 @@
 #!/bin/sh
 # FowlBrowser installer (macOS). Copies the app into ~/Library/Application Support/FowlBrowser, registers the
-# native host for every installed Chromium browser, and registers the MCP server and hooks with Claude Code.
-# Re-run to update. --lite skips Lighthouse. FOWLBROWSER_SKIP_CLAUDE=1 leaves Claude Code alone; uninstall.sh undoes it all.
+# native host for every installed Chromium browser, and registers the MCP server and hooks with Claude Code (and the
+# turn-end hooks with Codex, once Codex has the fowlbrowser MCP server). Re-run to update. --lite skips Lighthouse.
+# FOWLBROWSER_SKIP_CLAUDE=1 leaves Claude Code alone, FOWLBROWSER_SKIP_CODEX=1 Codex; uninstall.sh undoes it all.
 # Nothing keeps running on its own: the browser starts the host, Claude starts the MCP server.
 set -eu
 # --lite leaves Lighthouse out (about 160 MB on disk): every other tool works, and `lighthouse` says how to add it.
@@ -49,6 +50,15 @@ else
   # subagent runs (SubagentStart until SubagentStop) turn ends leave everything alone.
   node "$SRC/tools/claude-hooks.mjs" add "${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}" "$NODE" "$APP/mcp/bin/turn-ended.mjs"
   echo "To opt out: sh uninstall.sh removes these, and FOWLBROWSER_SKIP_CLAUDE=1 sh install.sh skips them."
+fi
+
+# Codex: once its config has the MCP server fowlbrowser (`codex mcp add`), two hooks in its hooks.json (Stop,
+# SubagentStop) that call the server's turn_end tool, so each turn's agent tabs close when it ends.
+CODEX_CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
+if [ "${FOWLBROWSER_SKIP_CODEX:-}" = 1 ]; then
+  echo "Codex: skipped (FOWLBROWSER_SKIP_CODEX=1)."
+elif [ -f "$CODEX_CONFIG" ] && grep -q '^\[mcp_servers\.fowlbrowser\]' "$CODEX_CONFIG"; then
+  "$NODE" "$SRC/tools/codex-hooks.mjs" add
 fi
 
 # Browsers already running FowlBrowser pick up the new extension code without the extensions page, unless

@@ -1,6 +1,7 @@
 // install.sh then uninstall.sh in a temp HOME with spaces in its path, run from a copy of the repo that has spaces too.
 // The user's own node (a folder first on PATH) is the one baked into the launchers; FOWLBROWSER_SKIP_CLAUDE=1 keeps
-// Claude Code's settings untouched; uninstall.sh leaves HOME exactly as it found it. Needs the network (npm ci).
+// Claude Code's settings untouched; Codex, with the fowlbrowser MCP server in its config, gets the turn_end hooks next
+// to the user's own; uninstall.sh leaves HOME exactly as it found it. Needs the network (npm ci).
 //   node --test test/install/
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -37,6 +38,12 @@ test('install.sh and uninstall.sh with spaces in every path, a fake node first o
   fs.mkdirSync(path.join(home, 'Library', 'Application Support'), { recursive: true });
   fs.mkdirSync(path.dirname(settings));
   fs.writeFileSync(settings, settingsText);
+  // Codex with the fowlbrowser MCP server (codex mcp add) and a hook of the user's own.
+  const codexHooks = path.join(home, '.codex', 'hooks.json');
+  const userHook = { hooks: { Stop: [{ hooks: [{ type: 'command', command: '/usr/bin/true' }] }] } };
+  fs.mkdirSync(path.dirname(codexHooks));
+  fs.writeFileSync(path.join(home, '.codex', 'config.toml'), `[mcp_servers.fowlbrowser]\ncommand = "${app}/mcp/bin/fowlbrowser-mcp"\n`);
+  fs.writeFileSync(codexHooks, `${JSON.stringify(userHook, null, 2)}\n`);
   fs.mkdirSync(fakeBin, { recursive: true });
   fs.symlinkSync(process.execPath, path.join(fakeBin, 'node'));
   fs.mkdirSync(repo, { recursive: true });
@@ -48,8 +55,13 @@ test('install.sh and uninstall.sh with spaces in every path, a fake node first o
     npm_config_cache: path.join(tmp, 'npm cache'),
   };
   delete env.CLAUDE_SETTINGS;
+  delete env.CODEX_HOME;
   const out = execFileSync('sh', [path.join(repo, 'install.sh'), '--lite'], { env, encoding: 'utf8' });
   assert.match(out, /Claude Code: skipped/);
+  const turnEnd = { type: 'mcp_tool', server: 'fowlbrowser', tool: 'turn_end', timeout: 10 };
+  assert.deepEqual(JSON.parse(fs.readFileSync(codexHooks, 'utf8')).hooks, {
+    Stop: [...userHook.hooks.Stop, { hooks: [turnEnd] }], SubagentStop: [{ hooks: [turnEnd] }],
+  });
 
   const node = path.join(fakeBin, 'node');
   const launcher = path.join(app, 'mcp', 'bin', 'fowlbrowser-mcp');
@@ -63,7 +75,8 @@ test('install.sh and uninstall.sh with spaces in every path, a fake node first o
   await client.connect(new StdioClientTransport({
     command: launcher, env: { PATH: '/usr/bin:/bin', HOME: home, FOWLBROWSER_DIR: path.join(tmp, 'sockets') },
   }));
-  assert.ok((await client.listTools()).tools.some((tool) => tool.name === 'browser_list'));
+  const tools = (await client.listTools()).tools.map((tool) => tool.name);
+  assert.ok(tools.includes('browser_list') && tools.includes('turn_end'));
   await client.close();
   fs.rmSync(path.join(tmp, 'sockets'), { recursive: true, force: true });
 

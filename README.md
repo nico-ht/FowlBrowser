@@ -149,8 +149,8 @@ Name your browsers (Work, Personal) by clicking the FowlBrowser icon in the tool
   but less tested.
 - A sign-in or payment pop-up that talks back to its page brings the browser to the front for a moment if you're in
   another app. Everything else stays in the background.
-- With Claude Code, an agent's work tabs close when it finishes its reply. With other agents they close when the
-  session ends.
+- With Claude Code and Codex, an agent's work tabs close when it finishes its reply. With other agents they close when
+  the session ends. Codex runs FowlBrowser's hooks once you trust them under `/hooks`.
 - While an agent works, Chrome shows a "started debugging this browser" bar. To hide it, quit Chrome and start it with
   `open -a "Google Chrome" --args --silent-debugger-extension-api`. That hides it for every extension that uses the
   debugger, not only FowlBrowser.
@@ -177,7 +177,7 @@ Extension: chrome.debugger and chrome.tabs
 
 | Area | Tools |
 | --- | --- |
-| Browsers and tabs | `browser_list`, `tab_list`, `tab_open`, `tab_claim`, `tab_release`, `tab_close`, `tab_keep`, `tab_handoff`, `tab_mute`, `tab_focus` |
+| Browsers and tabs | `browser_list`, `tab_list`, `tab_open`, `tab_claim`, `tab_release`, `tab_close`, `tab_keep`, `tab_handoff`, `tab_mute`, `tab_focus`, `turn_end` (for Codex's turn-end hook) |
 | Reading | `snapshot` (also as text, a list of links, or just the lines with some text), `screenshot`, `evaluate`, `console`, `network`, `wait_for` (or until the page settles), `viewport` (sizes, phones, dark mode, reduced motion) |
 | Acting | `navigate`, `click`, `hover`, `type`, `fill_form`, `select_option`, `press_key`, `scroll`, `drag`, `upload_files` (inputs, buttons and drop zones), `dialog`, `media` |
 | Files and data | `download`, `downloads`, `export`, `browser_data` |

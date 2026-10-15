@@ -319,6 +319,14 @@ honest pages; a page can always show its own field's value, so a page faking its
   later turn's reclaim is left alone). The session stays connected; a later turn claims a tab again to work in it. Two
   FowlBrowser servers under one Claude process share the socket name: the later one takes it over, and the first one's
   tabs are cleaned only when its session ends.
+  Codex: `tools/codex-hooks.mjs` (run by install.sh once Codex's config.toml has `[mcp_servers.fowlbrowser]`, or by hand
+  after `codex mcp add`) puts two `mcp_tool` hooks for server `fowlbrowser`, tool `turn_end`, in
+  `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`), for Stop and SubagentStop (timeout 10 s); uninstall.sh
+  removes only those, and `FOWLBROWSER_SKIP_CODEX=1` skips both. Codex calls the tool over the MCP connection of the
+  session whose turn ended (each thread and subagent has its own server), so no socket or process lookup is involved,
+  and runs the hooks only once the user trusted them (`/hooks`). `turn_end` runs the same cleanup as `turn_ended`
+  (one shared run with the socket's) and returns hook output as its text: `{}`, or
+  `{"systemMessage": "FowlBrowser could not clean up these tabs after the turn: <tab>: <error>; …"}` when tabs failed.
   Session end still cleans up everything (client disconnect). On exit the socket is removed only if it is still ours.
 - Record mode, for test runs only (`mcp/src/record.mjs`, env `FOWLBROWSER_RECORD=<dir>`): the cursor shows in every tab
   the session controls, background tabs too, and `<dir>/journal.jsonl` (the folder 0700, its files 0600: frames show the

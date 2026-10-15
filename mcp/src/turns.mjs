@@ -1,6 +1,7 @@
 // Turn end: Claude Code's Stop hook (bin/turn-ended.mjs) connects to a socket named after the Claude process
-// (this server's parent) and sends "turn_ended". This session's unkept agent tabs close, claimed and kept tabs go
-// back to the user, and the session stays connected for the next turn. Modeled on Codex's per-turn cleanup.
+// (this server's parent) and sends "turn_ended"; Codex's Stop and SubagentStop hooks call the turn_end tool over the
+// session's own MCP connection (tools/codex-hooks.mjs). This session's unkept agent tabs close, claimed and kept tabs
+// go back to the user, and the session stays connected for the next turn. Modeled on Codex's per-turn cleanup.
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -112,11 +113,14 @@ export async function endTurn(manager) {
   return errors.length ? { ...result, errors } : result;
 }
 
-// Lines from bin/turn-ended.mjs: turn_ended (Stop), subagent_start, subagent_stop. Concurrent turn ends share one run.
+// Concurrent turn ends (the socket, the turn_end tool) share one run.
+let running = null;
+export const runTurnEnd = (manager) => (running ??= endTurn(manager).finally(() => { running = null; }));
+
+// Lines from bin/turn-ended.mjs: turn_ended (Stop), subagent_start, subagent_stop.
 export function listenForTurns(manager, socketPath = turnSocketPath()) {
   if (!socketPath) return null;
-  let running = null;
-  const run = () => (running ??= endTurn(manager).finally(() => { running = null; }));
+  const run = () => runTurnEnd(manager);
   const reply = (socket, result) => socket.end(`${JSON.stringify(result)}\n`);
   fs.mkdirSync(path.dirname(socketPath), { recursive: true, mode: 0o700 });
   fs.rmSync(socketPath, { force: true });
