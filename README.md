@@ -151,6 +151,9 @@ Name your browsers (Work, Personal) by clicking the FowlBrowser icon in the tool
   another app. Everything else stays in the background.
 - With Claude Code and Codex, an agent's work tabs close when it finishes its reply. With other agents they close when
   the session ends. Codex runs FowlBrowser's hooks once you trust them under `/hooks`.
+- Chrome won't let an extension debug a page that shows another extension inside it, like a password manager's fill
+  menu. FowlBrowser removes such menus from the agent's tab when it attaches, so the agent keeps going. They come back
+  when the page reloads.
 - While an agent works, Chrome shows a "started debugging this browser" bar. To hide it, quit Chrome and start it with
   `open -a "Google Chrome" --args --silent-debugger-extension-api`. That hides it for every extension that uses the
   debugger, not only FowlBrowser.

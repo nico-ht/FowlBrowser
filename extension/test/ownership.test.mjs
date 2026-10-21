@@ -1,7 +1,7 @@
 // Run: node --test extension/test/
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCore, colorFor } from '../core.js';
+import { createCore, colorFor, removeExtensionFrames } from '../core.js';
 
 function fakeChrome({ session = {}, local = {} } = {}) {
   const tabs = new Map();
@@ -120,6 +120,13 @@ function fakeChrome({ session = {}, local = {} } = {}) {
       },
       async detach(target) { calls.push(['debugger.detach', target.tabId]); await wait('debugger.detach'); },
       async sendCommand(target, method, params) { calls.push(['debugger.sendCommand', target.tabId, method]); return { ok: method }; },
+    },
+    scripting: {
+      async executeScript(injection) {
+        calls.push(['scripting.executeScript', injection.target, injection.func?.name, injection.args]);
+        if (hooks.scriptError) throw new Error(hooks.scriptError);
+        return (hooks.scriptResults ?? [0]).map((result, frameId) => ({ frameId, result }));
+      },
     },
   };
   return chrome;
@@ -2502,4 +2509,68 @@ test('a client that leaves while tabs.open still sets up its tab: the tab leaves
   await Promise.all([opening, leaving]);
   assert.deepEqual(chrome.closedInGroup, []);
   assert.equal(core.owners.size, 0);
+});
+
+// Chrome 155 with 1Password (2026-10-21): a page holding another extension's page in a frame (its fill menu) refuses
+// chrome.debugger.attach with this error, so the extension takes those frames out and tries again.
+test('attach takes other extensions\' frames out of the page and tries again; nothing to take out, or still refused, fails as before', async () => {
+  const { core, chrome, call } = setup();
+  const { result: tab } = await call(1, 'tabs.open', {});
+  await core.onDebuggerDetach({ tabId: tab.id }, 'target_closed');
+  const refused = 'Cannot access a chrome-extension:// URL of different extension';
+  let refusals = 1;
+  const attach = chrome.debugger.attach;
+  chrome.debugger.attach = async (target) => {
+    chrome.calls.push(['debugger.attach', target.tabId]);
+    if (refusals-- > 0) throw new Error(refused);
+  };
+  chrome.hooks.scriptResults = [1, 0];
+  const attaches = () => chrome.calls.filter((c) => c[0] === 'debugger.attach').length;
+  const scripts = () => chrome.calls.filter((c) => c[0] === 'scripting.executeScript');
+  assert.ok(!(await call(1, 'chrome.debugger.attach', [{ tabId: tab.id }, '1.3'])).error);
+  assert.equal(attaches(), 2);
+  assert.deepEqual(scripts().map((c) => c.slice(1)), [[{ tabId: tab.id, allFrames: true }, 'removeExtensionFrames', ['fowlbrowser-ext']]]);
+  assert.ok(!core.owners.get(tab.id).detached);
+
+  // No such frame found: the error stands, the tab stays detached.
+  await core.onDebuggerDetach({ tabId: tab.id }, 'target_closed');
+  refusals = 1;
+  chrome.hooks.scriptResults = [0];
+  assert.match((await call(1, 'chrome.debugger.attach', [{ tabId: tab.id }, '1.3'])).error.message, /different extension/);
+  assert.equal(core.owners.get(tab.id).detached, true);
+  // The extension keeps adding it back: two rounds, then the error.
+  refusals = 10;
+  chrome.hooks.scriptResults = [1];
+  const before = attaches();
+  assert.match((await call(1, 'chrome.debugger.attach', [{ tabId: tab.id }, '1.3'])).error.message, /different extension/);
+  assert.equal(attaches() - before, 3);
+  // Other attach errors never touch the page.
+  const scripted = scripts().length;
+  chrome.debugger.attach = attach;
+  chrome.hooks.attachError = 'Cannot attach to this target';
+  assert.ok((await call(1, 'chrome.debugger.attach', [{ tabId: tab.id }, '1.3'])).error);
+  assert.equal(scripts().length, scripted);
+});
+
+test('removeExtensionFrames: other extensions\' frames, embeds and objects go, also in shadow roots; this extension\'s, web frames and links stay', () => {
+  const removed = [];
+  const el = (tag, attrs = {}, shadow = null) => ({
+    tagName: tag, shadowRoot: shadow, getAttribute: (name) => attrs[name] ?? null, remove() { removed.push(`${tag} ${attrs.src ?? attrs.data}`); },
+  });
+  const root = (els) => ({ querySelectorAll: (sel) => (sel === '*' ? els : els.filter((e) => ['IFRAME', 'FRAME', 'EMBED', 'OBJECT'].includes(e.tagName))) });
+  const inShadow = el('IFRAME', { src: 'chrome-extension://bitwarden/overlay.html' });
+  const host = el('DIV', {}, root([inShadow]));
+  const doc = root([
+    el('IFRAME', { src: ' chrome-extension://aeblf/inline/menu/menu.html' }), el('IFRAME', { src: 'chrome-extension://own-id/popup.html' }),
+    el('IFRAME', { src: 'https://www.youtube.com/embed/x' }), el('EMBED', { src: 'CHROME-EXTENSION://lastpass/x' }),
+    el('OBJECT', { data: 'chrome-extension://grammarly/x' }), el('A', { src: 'chrome-extension://aeblf/x' }), host,
+  ]);
+  globalThis.document = doc;
+  try {
+    assert.equal(removeExtensionFrames('own-id'), 4);
+  } finally {
+    delete globalThis.document;
+  }
+  assert.deepEqual(removed, ['IFRAME  chrome-extension://aeblf/inline/menu/menu.html', 'EMBED CHROME-EXTENSION://lastpass/x',
+    'OBJECT chrome-extension://grammarly/x', 'IFRAME chrome-extension://bitwarden/overlay.html']);
 });

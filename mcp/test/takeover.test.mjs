@@ -259,6 +259,29 @@ test('a link for another app (mailto:, zoommtg:) is no takeover: the tab is atta
   assert.equal((await call('console', { tab: `${browser.key}:1` })).error, false, 'the tab works');
 });
 
+// Measured on Chrome 155 (2026-10-21) with 1Password: typing into a sign-in or profile field makes it add its fill menu,
+// a chrome-extension:// iframe, and the debugger detaches (target_closed) as that frame starts loading, though the tab
+// stays on its page. The extension takes such frames out when it attaches again.
+test('another extension\'s frame (a password manager\'s fill menu) is no takeover: the tab is attached again and the agent hears it once', async () => {
+  const page = 'https://shop.example/checkout';
+  const browser = await fakeBrowser({ ids: [1, 2], listed: () => [1, 2].map((id) => ({ id, owner: 'you', url: page })) });
+  const again = [];
+  browser.relay.model.reattach = async (tabId) => { again.push(tabId); };
+  const frame = 'chrome-extension://aeblfdkhhhdcdjpifhhbdiojplfjncoa/inline/menu/menu.html?fieldDesignation=name';
+  // From the tab's main session, or from an out-of-process iframe's own session.
+  browser.host.emit('event', 'chrome.debugger.onEvent', [{ tabId: 1 }, 'Page.frameRequestedNavigation', { frameId: 'MENU', reason: 'initialFrameNavigation', url: frame, disposition: 'currentTab' }]);
+  detach(browser, 1, 'target_closed');
+  browser.host.emit('event', 'chrome.debugger.onEvent', [{ tabId: 2, sessionId: 'OOPIF' }, 'Page.frameRequestedNavigation', { frameId: 'MENU', reason: 'initialFrameNavigation', url: frame, disposition: 'currentTab' }]);
+  detach(browser, 2, 'target_closed');
+  await sleep(400);
+  assert.deepEqual(again, [1, 2]);
+  assert.deepEqual(parks(browser), [], 'not taken over');
+  const text = (await toolsFor(browser)('tab_list', { scope: 'mine' })).text;
+  assert.match(text, new RegExp(`The page in ${browser.key}:1 showed another browser extension's page in a frame \\(chrome-extension://aeblf`));
+  assert.match(text, /FowlBrowser attached again \(taking such frames out of the page where needed\): the tab is still yours/);
+  assert.doesNotMatch(text, /took over/);
+});
+
 test('a link for another app right after input still being judged (a slow tabs.isShown) is no reattach: the tab is taken over', async () => {
   let shown;
   const page = 'https://shop.example/checkout';

@@ -82,9 +82,9 @@ const parking = new Map(); // "chrome:52" -> its takeover's park, or its handoff
 const judging = new WeakMap(); // Tab -> reports of input in it still being judged (onReport), for userSettled
 const givenBack = new Set(); // "chrome:52" popups the extension gave back to the user who opened them, for KEEP_MS
 const usersInput = new Map(); // "chrome:52" -> when the user's latest input in it was (onReport)
-const appLinks = new Map(); // "chrome:52" -> { url, at } of the page's latest navigation to a link for another app
-const reattached = new Map(); // "chrome:52" -> notice: attached again after a link for another app, not told yet
-const recovering = new Map(); // "chrome:52" -> a detach after a link for another app, until judged and attached again
+const appLinks = new Map(); // "chrome:52" -> { url, at, frame } of the page's latest link for another app, or another extension's frame
+const reattached = new Map(); // "chrome:52" -> notice: attached again after either of those, not told yet
+const recovering = new Map(); // "chrome:52" -> a detach after either of those, until judged and attached again
 const calls = new AsyncLocalStorage(); // the tool call code runs for: { tabKey, onParked } (see inCall)
 
 const keyOf = (browser, tabId) => `${browser.key}:${tabId}`;
@@ -298,8 +298,8 @@ export function watchTakeovers(browser) {
       const [source, cdpMethod, cdpParams] = params ?? [];
       if (!source?.sessionId && cdpMethod === 'Inspector.targetCrashed') crashed.set(keyOf(browser, source?.tabId), Date.now());
       else if (!source?.sessionId && cdpMethod === 'Page.downloadWillBegin') downloaded.set(keyOf(browser, source?.tabId), Date.now());
-      else if (!source?.sessionId && cdpMethod === 'Page.frameRequestedNavigation' && appLink(cdpParams?.url)) {
-        appLinks.set(keyOf(browser, source?.tabId), { url: cdpParams.url, at: Date.now() });
+      else if (cdpMethod === 'Page.frameRequestedNavigation' && ((!source?.sessionId && appLink(cdpParams?.url)) || extensionPage(cdpParams?.url))) {
+        appLinks.set(keyOf(browser, source?.tabId), { url: cdpParams.url, at: Date.now(), frame: extensionPage(cdpParams.url) });
       }
     }
   });
@@ -316,6 +316,9 @@ const BROWSER_PAGE = /^(chrome|chrome-extension|chrome-search|chrome-untrusted|d
 // A link the browser hands to another app (mailto:, tel:, zoommtg:, slack:...): neither a web page nor a browser page.
 const appLink = (url) => /^[a-z][a-z0-9+.-]*:/i.test(url ?? '') && !BROWSER_PAGE.test(url)
   && !/^(https?|data|blob|javascript|file|filesystem|view-source|wss?):/i.test(url);
+// Another extension's page in a frame of the tab (a password manager's fill menu): Chrome lets the debugger go as that
+// frame starts loading, and refuses to attach while it is there (the extension takes such frames out before attaching).
+const extensionPage = (url) => /^chrome-extension:/i.test(url ?? '');
 
 async function onDetach(browser, tabId, reason) {
   const key = keyOf(browser, tabId);
@@ -323,21 +326,22 @@ async function onDetach(browser, tabId, reason) {
   const detachedAt = Date.now();
   const tab = browser.tabs.get(tabId);
   const url = tab?.page.url();
-  const link = Date.now() - (appLinks.get(key)?.at ?? -Infinity) <= APP_LINK_MS ? appLinks.get(key).url : null;
+  const link = Date.now() - (appLinks.get(key)?.at ?? -Infinity) <= APP_LINK_MS ? appLinks.get(key) : null;
   appLinks.delete(key);
   lastTabs.set(key, tab);
   setTimeout(() => lastTabs.delete(key), CLOSED_BY_PAGE_MS).unref();
   if (reason === 'canceled_by_user') return takeOver(browser, tabId, 'pressed Cancel on the browser\'s debugging bar', { tab });
   // target_closed: the tab closed (onRemoved follows), its renderer died, it went to a page the debugger may not stay
-  // on, or its page asked for a link for another app (the browser lets the debugger go as that navigation starts,
-  // though it never leaves the page).
+  // on, or its page asked for a link for another app or showed another extension's page in a frame (the browser lets
+  // the debugger go as that navigation starts, though the tab never leaves its page).
   if (reason !== 'target_closed' || recently(crashed, key, CRASH_MS)) return;
   const judged = (async () => {
     await sleep(SETTLE_MS);
     if (records.has(key)) return;
     const info = await tabInfo(browser, tabId).catch(() => null);
     if (info?.owner !== 'you' || info.parked) return;
-    // The page's link for another app, on the same page, with no input of the user's behind it: still the agent's tab.
+    // The page's link for another app or another extension's frame, on the same page, with no input of the user's
+    // behind it: still the agent's tab.
     // Input reports still being judged (their tabs.isShown can be slow) are waited for; one still unjudged then counts
     // as the user's.
     if (link && url && info.url === url) {
@@ -358,8 +362,8 @@ async function onDetach(browser, tabId, reason) {
 
 // Attached again (a new page for Playwright, so refs start over), told once in the next result. False when it does
 // not come back: then it is a takeover as any other detach.
-// old: the Tab from before the detach, whose page log carries over.
-async function reattach(browser, tabId, link, url, old) {
+// link: { url, frame } of what let the debugger go; old: the Tab from before the detach, whose page log carries over.
+async function reattach(browser, tabId, { url: link, frame }, url, old) {
   const key = keyOf(browser, tabId);
   try {
     await browser.relay.model.reattach(tabId);
@@ -368,8 +372,10 @@ async function reattach(browser, tabId, link, url, old) {
     return false;
   }
   debug('reattached', key, link);
-  reattached.set(key, `The page in ${key} opened ${link.slice(0, 80)}, a link for another app (if one is installed), and the browser let go ` +
-    'of the tab for it. FowlBrowser attached again: the tab is still yours, on the same page, but refs from before are void, so call snapshot.');
+  const what = frame
+    ? `The page in ${key} showed another browser extension's page in a frame (${link.slice(0, 60)}, e.g. a password manager's fill menu), and the browser let go of the tab for it. FowlBrowser attached again (taking such frames out of the page where needed)`
+    : `The page in ${key} opened ${link.slice(0, 80)}, a link for another app (if one is installed), and the browser let go of the tab for it. FowlBrowser attached again`;
+  reattached.set(key, `${what}: the tab is still yours, on the same page, but refs from before are void, so call snapshot.`);
   tabEvent('reattach', key, url, { link });
   const next = await browser.waitForTab(tabId).catch(() => null); // mapped again (recoveries)
   // The same page: what it logged and loaded before is still this page's (console, network), and older pages' stay older.

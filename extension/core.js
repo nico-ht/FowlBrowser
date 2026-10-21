@@ -47,6 +47,8 @@ const waitsOnPage = (method, params) => method === 'Page.navigate' || (/^Runtime
 const EXPECT_CHILD_MAX_MS = 5000;     // also how long the user's turn of a tab lasts (a page's transient activation)
 const LAST_OWNED_MS = 5000; // how long a closed owned tab can still open the popup it asked for (tabs.openChild)
 const CLEANUP_RETRY_MS = [200, 1000];
+const FOREIGN_FRAME_TRIES = 2;       // attach retries after taking other extensions' frames out of the page
+const OTHER_EXTENSION_FRAME = /chrome-extension:\/\/ URL of different extension/i;
 const DOWNLOAD_MATCH_MS = 10_000;      // how long downloads and Page.downloadWillBegin signals are kept for matching
 const DOWNLOAD_SETTLE_MS = 800;        // quiet time after the latest of them before any is attributed
 const DOWNLOAD_PAIR_MS = 2000;         // a download and its tab's signal arrive this close together, or they don't pair
@@ -90,6 +92,28 @@ export function isRestricted(url) {
 function offTheWeb(url) {
   const inner = String(url ?? '').replace(/^(blob|filesystem):/, '');
   return isRestricted(inner) && !/^about:blank[?#]/.test(inner);
+}
+
+// Runs in the page (chrome.scripting, this extension's isolated world): takes out every frame, embed or object showing
+// another extension's page, also inside shadow roots (closed ones through chrome.dom). Returns how many.
+export function removeExtensionFrames(ownId) {
+  const own = `chrome-extension://${ownId}/`;
+  const foreign = (el) => {
+    const url = String(el.getAttribute('src') ?? el.getAttribute('data') ?? '').trim();
+    return /^chrome-extension:/i.test(url) && !url.toLowerCase().startsWith(own);
+  };
+  let removed = 0;
+  const visit = (root) => {
+    for (const el of root.querySelectorAll('iframe, frame, embed, object')) {
+      if (foreign(el)) { el.remove(); removed++; }
+    }
+    for (const el of root.querySelectorAll('*')) {
+      const shadow = globalThis.chrome?.dom?.openOrClosedShadowRoot?.(el) ?? el.shadowRoot;
+      if (shadow) visit(shadow);
+    }
+  };
+  visit(document);
+  return removed;
 }
 
 // No cookie value leaves the extension, HttpOnly ones included (a page's own script can't read those; any process
@@ -244,6 +268,32 @@ export function createCore({ chrome, send, timers = globalThis }) {
     const page = parsed(String(url ?? '').replace(/^(blob|filesystem):/i, ''));
     return page?.protocol === 'chrome-extension:' && page.hostname === chrome.runtime.id;
   };
+  // Chrome lets no extension debug a page that holds another extension's page in a frame (a password manager's fill
+  // menu, a toolbar): attach fails with "Cannot access a chrome-extension:// URL of different extension", and such a
+  // frame appearing lets the debugger go (target_closed). Such frames are taken out of the page (chrome.scripting, in
+  // this extension's isolated world, closed shadow roots too) and the attach tried again, at most twice.
+  async function attachDebugger(tabId, version) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await chrome.debugger.attach({ tabId }, version);
+      } catch (error) {
+        if (/already attached/i.test(error.message)) return;
+        if (!OTHER_EXTENSION_FRAME.test(error.message) || attempt >= FOREIGN_FRAME_TRIES) throw error;
+        const removed = await removeForeignFrames(tabId).catch((failure) => {
+          log('removing other extensions\' frames failed', tabId, failure.message);
+          return 0;
+        });
+        log('removed other extensions\' frames', tabId, removed);
+        if (!removed) throw error;
+      }
+    }
+  }
+
+  async function removeForeignFrames(tabId) {
+    const results = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: removeExtensionFrames, args: [chrome.runtime.id] });
+    return results.reduce((sum, { result }) => sum + (Number(result) || 0), 0);
+  }
+
   const notOnTheWeb = (tabId) => new Error(`Tab ${tabId} shows a browser, extension or local page, which agents can't control`);
 
   const ownedByOther = (tabId) => new Error(`Tab ${tabId} is controlled by another agent session: leave it alone (to work on the same page, open its URL in a tab of your own)`);
@@ -867,11 +917,7 @@ export function createCore({ chrome, send, timers = globalThis }) {
       try {
         // Also by the tab's URL now: offWeb is lost when the service worker restarts.
         if (offWeb.has(tabId) || offTheWeb((await chrome.tabs.get(tabId)).url)) throw notOnTheWeb(tabId);
-        try {
-          await chrome.debugger.attach({ tabId }, version);
-        } catch (error) {
-          if (!/already attached/i.test(error.message)) throw error;
-        }
+        await attachDebugger(tabId, version);
         // It left the web while attaching: leftTheWeb's detach may have come first.
         if (offWeb.has(tabId)) {
           await chrome.debugger.detach({ tabId }).catch(() => {});
