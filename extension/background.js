@@ -1,5 +1,6 @@
 // FowlBrowser service worker: native messaging transport plus chrome event wiring.
 // The logic lives in core.js so it can be tested without a browser.
+import { ownBuild } from './build.js';
 import { createCore } from './core.js';
 
 const HOST_NAME = 'com.fowl.browser';
@@ -19,14 +20,15 @@ function setStatus(next) {
 chrome.action.setBadgeBackgroundColor({ color: '#e8890c' });
 
 const core = createCore({ chrome, send: (msg) => port?.postMessage(msg) });
+const build = ownBuild(chrome); // the code this worker runs, read as it starts
 
 // The label is the name the user gave this browser profile in the popup ("Work"); agents see "Chrome (Work)".
 async function sayHello(current) {
-  const [instanceId, { label = '' }] = await Promise.all([core.instanceId(), chrome.storage.local.get('label')]);
+  const [instanceId, { label = '' }, code] = await Promise.all([core.instanceId(), chrome.storage.local.get('label'), build]);
   if (port !== current) return;
   current.postMessage({
     method: 'extension.hello',
-    params: { version: chrome.runtime.getManifest().version, instanceId, userAgent: navigator.userAgent, label },
+    params: { version: chrome.runtime.getManifest().version, build: code, instanceId, userAgent: navigator.userAgent, label },
   });
 }
 

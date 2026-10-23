@@ -294,6 +294,19 @@ export class Tab extends EventEmitter {
   }
 }
 
+// Why a tab could not be attached, for the agent: what the extension said, and for another extension's frame in the
+// page (Chrome refuses to debug such a page: "Cannot access a chrome-extension:// URL of different extension") what
+// makes it go away.
+export function attachFailure(id, error) {
+  const message = String(error?.message ?? error ?? '').replace(/\.$/, '');
+  if (/chrome-extension:\/\/ URL of different extension/i.test(message)) {
+    return `Tab ${id} could not be attached: another extension (a password manager's fill or sign-in menu, for example) ` +
+      'shows its own frame in the page, and Chrome lets no extension debug a page while that frame is there. ' +
+      'Ask the user to close that menu (Esc, or a click elsewhere in the page) or to reload the page, then call tab_claim on it again.';
+  }
+  return `Tab ${id} could not be attached: ${message}.`;
+}
+
 export class Browser {
   constructor(key, host) {
     this.key = key; // socket base name: "helium", "chrome", "helium-2"
@@ -449,10 +462,14 @@ export class Browser {
   // Resolves the Tab once Playwright has a page for this chrome tab. One let go (the user took over, or it showed a local
   // file agents can't open, also before it was ever attached) fails with its notice at once, or as that is noted while
   // this waits, not at the timeout; a call that works on parked tabs (tab_claim resuming one) waits for the tab itself.
-  async waitForTab(tabId, timeout = ACTION_TIMEOUT_MS) {
+  // attachedSince (ms): an attachment the extension refuses from then on fails the wait at once with the reason
+  // (tab_claim, which asks for that attachment itself), instead of at the timeout.
+  async waitForTab(tabId, timeout = ACTION_TIMEOUT_MS, { attachedSince } = {}) {
     await this.playwright();
     if (this.tabs.has(tabId)) return this.tabs.get(tabId);
     const key = `${this.key}:${tabId}`;
+    const refusedAlready = attachedSince !== undefined && !this.relay.model.isAttached(tabId) && this.relay.model.attachError(tabId, attachedSince);
+    if (refusedAlready) throw new Error(attachFailure(key, refusedAlready));
     const parked = !currentCall()?.onParked && notice(key);
     if (parked) throw new Error(parked);
     let resolve, takenOver;
@@ -460,12 +477,17 @@ export class Browser {
     if (!this._waiters.has(tabId)) this._waiters.set(tabId, new Set());
     this._waiters.get(tabId).add(resolve);
     const stopListening = onTakeover(key, takenOver);
+    const stopAttachWatch = attachedSince !== undefined
+      ? this.relay.model.onAttachFailed(tabId, (error) => takenOver(attachFailure(key, error)))
+      : () => {};
     let timer;
     const timedOut = new Promise((_, reject) => {
       timer = setTimeout(() => {
         const parkedNotice = notice(key);
         if (parkedNotice) return reject(new Error(parkedNotice));
         const detached = this.relay.model.hasTab(tabId) && !this.relay.model.isAttached(tabId);
+        const refused = detached && this.relay.model.attachError(tabId);
+        if (refused) return reject(new Error(attachFailure(key, refused)));
         reject(new Error(`Tab ${key} did not become controllable within ${timeout / 1000} s.` + (detached
           ? ' Its debugger is detached (the user canceled debugging or opened DevTools on it); it is still yours. Call tab_claim on it to re-attach (DevTools must be closed).'
           : '')));
@@ -474,6 +496,7 @@ export class Browser {
     return Promise.race([mapped, timedOut]).finally(() => {
       clearTimeout(timer);
       stopListening();
+      stopAttachWatch();
       this._waiters.get(tabId)?.delete(resolve);
       if (!this._waiters.get(tabId)?.size) this._waiters.delete(tabId);
     });

@@ -8,7 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
-import { Browser, Tab } from '../src/browsers.mjs';
+import { attachFailure, Browser, Tab } from '../src/browsers.mjs';
+import { BrowserModel } from '../src/vendor/browserModel.mjs';
 import { installPopups, POPUP_BINDING } from '../src/popups.mjs';
 import { Activity, agentInput, markEnding, USER_BINDING, userSettled, wasGivenBack, watchTakeovers, watchUserInput } from '../src/takeover.mjs';
 import { registerTools } from '../src/tools.mjs';
@@ -479,6 +480,55 @@ test('a resume whose attach fails parks the tab again and keeps its notice', asy
   assert.equal((await call('tab_claim', { tab: id, resume: true })).error, true);
   assert.deepEqual(parks(browser), [{ tabId: 1, kind: 'handoff' }, { tabId: 1, kind: 'handoff' }]);
   assert.match((await call('console', { tab: id })).text, /You handed .*:1 to the user/);
+});
+
+// Measured on Chrome 155 with 1Password 8.12 (2026-10-23): a shop's inquiry form got 1Password's sign-in menu (a
+// chrome-extension:// frame), the debugger let go and every resume waited 30 s for "did not become controllable ...
+// opened DevTools on it", though the extension had answered at once: "Cannot access a chrome-extension:// URL of
+// different extension". The resume now ends with that reason as it comes, and the tab stays parked.
+test('a resume the extension refuses to attach ends at once with the reason (another extension\'s frame), not after 30 s', async () => {
+  const browser = await waitingBrowser({ ids: [1] });
+  const call = toolsFor(browser);
+  const id = `${browser.key}:1`;
+  await call('tab_handoff', { tab: id, reason: 'log in' });
+  browser.tabs.delete(1); // the relay dropped its page
+  const model = new BrowserModel(async (method) => {
+    if (method === 'chrome.debugger.attach') throw new Error('Cannot access a chrome-extension:// URL of different extension');
+    return {};
+  });
+  model._autoAttach = true;
+  browser.relay.model = model;
+  const started = Date.now();
+  const resumed = await call('tab_claim', { tab: id, resume: true });
+  assert.ok(Date.now() - started < 1000, `${Date.now() - started} ms`);
+  assert.equal(resumed.error, true);
+  assert.match(resumed.text, /could not be attached: another extension \(a password manager's fill or sign-in menu, for example\)/);
+  assert.ok(!/DevTools/.test(resumed.text), resumed.text);
+  assert.deepEqual(parks(browser), [{ tabId: 1, kind: 'handoff' }, { tabId: 1, kind: 'handoff' }]);
+  assert.deepEqual([...browser._waiters.keys()], [], 'nothing left waiting');
+});
+
+test('attach failures: kept per tab until one works, only the extension\'s refusals, and said as such', async () => {
+  let refuse = true;
+  const model = new BrowserModel(async (method) => {
+    if (method === 'chrome.debugger.attach' && refuse) throw new Error('Debugger is not available');
+    return { targetInfo: { targetId: 'T1' } };
+  });
+  model.connectOverCDP(() => {});
+  model.onTabCreated({ id: 5 });
+  const seen = [];
+  const stop = model.onAttachFailed(5, (error) => seen.push(error.message));
+  const before = Date.now();
+  await assert.rejects(model.reattach(5), /not available/);
+  assert.deepEqual(seen, ['Debugger is not available']);
+  assert.equal(model.attachError(5).message, 'Debugger is not available');
+  assert.equal(model.attachError(5, before + 60_000), null, 'not one from before `since`');
+  stop();
+  refuse = false;
+  await model.reattach(5);
+  assert.equal(model.attachError(5), null, 'cleared by an attach that works');
+  assert.equal(seen.length, 1);
+  assert.equal(attachFailure('chrome:5', new Error('Debugger is not available.')), 'Tab chrome:5 could not be attached: Debugger is not available.');
 });
 
 test('turn end leaves a tab alone whose takeover is noted but not parked yet, also when it comes during the cleanup', async () => {

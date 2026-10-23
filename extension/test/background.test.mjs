@@ -17,9 +17,10 @@ function fakeChrome() {
       id: 'fowlbrowser-ext',
       lastError: undefined,
       getManifest: () => ({ version: '0.1.0' }),
+      getURL: (name) => new URL(`../${name}`, import.meta.url).href,
       onMessage: event('runtime.onMessage'), onStartup: event('runtime.onStartup'), onInstalled: event('runtime.onInstalled'),
       connectNative() {
-        const port = { messages: [], disconnects: [], postMessage: () => {} };
+        const port = { messages: [], disconnects: [], posted: [], postMessage: (msg) => port.posted.push(msg) };
         port.onMessage = { addListener: (fn) => port.messages.push(fn) };
         port.onDisconnect = { addListener: (fn) => port.disconnects.push(fn) };
         ports.push(port);
@@ -74,4 +75,22 @@ test('no host installed still reads as missing', async () => {
   fake.disconnect(fake.ports[0], 'Specified native messaging host not found.');
   assert.equal((await fake.status()).state, 'missing');
   assert.equal(fake.badge(), '!');
+});
+
+test('the hello names the build of the code the worker runs, hashed from its own files', async () => {
+  const { installedBuild } = await import('../../mcp/src/extensionBuild.mjs');
+  const realFetch = globalThis.fetch;
+  const fs = await import('node:fs');
+  globalThis.fetch = async (url) => ({ ok: true, status: 200, text: async () => fs.readFileSync(new URL(url), 'utf8') });
+  try {
+    const fake = await load();
+    let hello;
+    for (let i = 0; i < 50 && !hello; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      hello = fake.ports[0].posted.find((m) => m.method === 'extension.hello');
+    }
+    assert.equal(hello?.params.build, installedBuild());
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

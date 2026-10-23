@@ -19,7 +19,8 @@
 // `hasTab()`/`isAttached()` for the server, `disconnectCDP()` returns the attached tab ids and the attachments
 // still in flight, a CDP generation fences attachments that land after a disconnect (they detach again instead
 // of installing a session), a tab removed while attaching is not installed, `forgetTab()` and `reattach()` for the
-// server, and errors are logged to stderr instead of Playwright's debug logger.
+// server, and errors are logged to stderr instead of Playwright's debug logger. A failed attach is kept per tab
+// (`attachError()`, `onAttachFailed()`), so the server can say why a tab did not become controllable.
 
 const logUnhandledError = (error) => process.stderr.write(`[fowlbrowser] ${error?.stack ?? error}\n`);
 
@@ -41,6 +42,8 @@ export class BrowserModel {
   _nextSessionId = 1;
   _generation = 0;           // bumped on every CDP disconnect
   _attaching = new Map();    // tabId -> Promise<tabSession> of an attachment in flight
+  _attachErrors = new Map(); // tabId -> { error, at } of its latest failed attachment (FowlBrowser)
+  _attachListeners = new Map(); // tabId -> Set of callbacks told of a failed attachment (FowlBrowser)
   gestures = new Map();      // tabId -> calls running now whose evaluations act for the user (FowlBrowser)
 
   constructor(sendToExtension) {
@@ -73,6 +76,25 @@ export class BrowserModel {
     return this._tabSessions.has(tabId);
   }
 
+  // The error of the tab's latest attachment that failed in the extension (cleared by one that works), or null;
+  // with `since` (ms), only one that failed at or after then.
+  attachError(tabId, since = 0) {
+    const failed = this._attachErrors.get(tabId);
+    return failed && failed.at >= since ? failed.error : null;
+  }
+
+  // Calls back with the error of each attachment of the tab that fails from now on; returns the unsubscribe.
+  onAttachFailed(tabId, callback) {
+    if (!this._attachListeners.has(tabId))
+      this._attachListeners.set(tabId, new Set());
+    this._attachListeners.get(tabId).add(callback);
+    return () => {
+      this._attachListeners.get(tabId)?.delete(callback);
+      if (!this._attachListeners.get(tabId)?.size)
+        this._attachListeners.delete(tabId);
+    };
+  }
+
   _emit(message) {
     this._sendToCDPClient?.(message);
   }
@@ -89,6 +111,7 @@ export class BrowserModel {
 
   onTabRemoved(tabId) {
     this._knownTabs.delete(tabId);
+    this._attachErrors.delete(tabId);
     this._detachTab(tabId);
   }
 
@@ -204,10 +227,21 @@ export class BrowserModel {
     const existing = this._tabSessions.get(tabId) ?? this._attaching.get(tabId);
     if (existing)
       return existing;
-    const attach = this._doAttachTab(tabId, this._generation);
+    const generation = this._generation;
+    const attach = this._doAttachTab(tabId, generation);
     this._attaching.set(tabId, attach);
     try {
-      return await attach;
+      const tabSession = await attach;
+      this._attachErrors.delete(tabId);
+      return tabSession;
+    } catch (error) {
+      // Only what the extension refused counts: not a disconnect of Playwright or the tab going away meanwhile.
+      if (generation === this._generation && this._knownTabs.has(tabId)) {
+        this._attachErrors.set(tabId, { error, at: Date.now() });
+        for (const callback of [...(this._attachListeners.get(tabId) ?? [])])
+          callback(error);
+      }
+      throw error;
     } finally {
       if (this._attaching.get(tabId) === attach)
         this._attaching.delete(tabId);

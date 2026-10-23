@@ -158,6 +158,9 @@ Name your browsers (Work, Personal) by clicking the FowlBrowser icon in the tool
 - Chrome won't let an extension debug a page that shows another extension inside it, like a password manager's fill
   menu. FowlBrowser removes such menus from the agent's tab when it attaches, so the agent keeps going. They come back
   when the page reloads.
+- After an update, reload FowlBrowser on the browser's extensions page (or restart the browser) once no agent is
+  working. Until then, and when the extension was loaded from another folder than
+  `~/Library/Application Support/FowlBrowser/extension`, `browser_list` tells the agent the browser runs another build.
 - With Claude Code, a hook stops agents opening pages in your browser from the shell (`open -a "Google Chrome" page.html`
   and the like) so every page they show you goes through FowlBrowser. `sh uninstall.sh` or
   `FOWLBROWSER_SKIP_CLAUDE=1 sh install.sh` leaves it out.

@@ -58,8 +58,10 @@ a file holding anything else is replaced at host start, in one step, and the tok
 hosts replacing it at once still agree). A socket client's first message must be `{method:"host.auth", params:{token}}`; anything else, or a wrong token, closes the socket
 before any message reaches the extension. Only after auth does the host send `host.hello`.
 
-On connect the extension sends `{method:"extension.hello", params:{version, instanceId, userAgent, label}}` (instanceId: random
-UUID kept in chrome.storage.local; label: the name the user gave this browser profile in the popup, `''` if none). It
+On connect the extension sends `{method:"extension.hello", params:{version, build, instanceId, userAgent, label}}` (instanceId: random
+UUID kept in chrome.storage.local; label: the name the user gave this browser profile in the popup, `''` if none;
+build: the first 16 hex digits of a SHA-256 over `manifest.json`, `background.js`, `core.js` and `build.js` as the
+service worker read them when it started (`extension/build.js`), `null` if that failed). It
 sends it again when the label changes; the host forwards that one to every greeted client as an `extension.hello`
 event. Once listening, the host sends the extension `{method:"host.listening", params:{browser, key:<socket base name,
 e.g. chrome-2>}}`.
@@ -211,6 +213,11 @@ and Chrome would have shown it.
   ask the user to check it. One that isn't running is never started: the error says to ask the user to open it.
   `browser_list` lists asleep browsers after the connected ones, saying which. Only with the real socket folder (no
   `FOWLBROWSER_DIR`: tests and the fake extension look at no real browser).
+  Under a connected browser whose `extension.hello` build differs from the extension folder installed with the server
+  (`../../extension` from `mcp/src`, hashed the same way, `src/extensionBuild.mjs`), or names none (an older
+  extension), `browser_list` adds a note: the browser runs another FowlBrowser build, so ask the user to reload it on
+  the extensions page, or, if it was loaded from another folder, Load unpacked on the installed one. Measured
+  2026-10-23: Chrome had the extension loaded from a clone outside the app folder, so the installed fixes never ran.
 - Per browser: a relay (vendored `BrowserModel` + the browser-level command handling from Playwright's `cdpRelay.ts`)
   served on `ws://127.0.0.1:<random port>/<random token>`; `chromium.connectOverCDP(url)` lazily on first use (and
   playwright-core is imported then, not at startup); pages mapped to chrome tab ids. The browser app's version is read
@@ -528,6 +535,11 @@ A tab this session controls (agent or claimed) is **taken over** only when contr
   the next result starts once with "The page in chrome:52 showed another browser extension's page in a frame (…), and
   the browser let go of the tab for it. FowlBrowser attached again (taking such frames out of the page where needed):
   …". The extension's `chrome.debugger.attach` takes such frames out (see there).
+  An attach the extension refuses is kept per tab (`BrowserModel.attachError`, cleared by one that works): tab_claim
+  (also with resume) fails as soon as the attach it asked for is refused, with the reason ("Tab chrome:52 could not be
+  attached: …"; for another extension's frame, that a password manager's menu or the like is in the page and the user
+  can close it or reload the page), and the tab stays parked as before. Other waits for a tab that time out give that
+  reason instead of the guess that DevTools is open.
 - DevTools opening on the tab: measured on a test Mac (Chrome 154.0.8037.99, Helium 0.18.3.1, 2026-10-11) with the real
   Cmd-Opt-I on a focused agent tab: DevTools opens docked, our debugger session stays (no `onDetach`), calls on the tab
   keep working, so it is no takeover.

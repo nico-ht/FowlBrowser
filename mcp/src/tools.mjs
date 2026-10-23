@@ -10,6 +10,7 @@ import { callOnShadowRef, cleanRef, closedShadowSection, focusShadowRef, isShado
 import * as cursor from './cursor/index.mjs';
 import { debug } from './debug.mjs';
 import { EXPORT_DESCRIPTION, exportShape, exportTab } from './exports.mjs';
+import { buildMismatch } from './extensionBuild.mjs';
 import { registerPerf } from './perf.mjs';
 import { backgroundClick, openingLines, uninstallPopups } from './popups.mjs';
 import * as record from './record.mjs';
@@ -1734,6 +1735,8 @@ export function registerTools(server, manager) {
         const bar = b.silentDebugger ? 'debugging bar silenced' : 'debugging bar NOT silenced (the user sees a "started debugging" notice while a tab is controlled)';
         const mine = [...b.tabs.values()].map((t) => t.id);
         lines.push(`- ${b.name} (${version}) · browser: "${b.key}" · ${bar} · tabs you control: ${mine.length ? mine.join(', ') : 'none'}`);
+        const stale = buildMismatch(b.host.hello.extension);
+        if (stale) lines.push(`  Note: ${stale}.`);
       }
       if (asleep.length) lines.push(`Installed but not connected (${asleep.length}):`, ...asleep);
       return text(lines.join('\n'));
@@ -1849,12 +1852,13 @@ export function registerTools(server, manager) {
       const browser = await manager.get(key);
       await browser.playwright();
       const parked = await check();
+      const claimedAt = Date.now();
       const claimed = await browser.host.request('tabs.claim', { tabId, resume: resume === true });
       // If the debugger isn't attached (an earlier attach failed), announce the tab again so a retry really retries.
       if (!browser.relay.model.isAttached(tabId)) browser.relay.model.onTabCreated(claimed);
       let tab;
       try {
-        tab = await browser.waitForTab(tabId, NAVIGATION_TIMEOUT_MS);
+        tab = await browser.waitForTab(tabId, NAVIGATION_TIMEOUT_MS, { attachedSince: claimedAt });
       } catch (error) {
         // A resume that did not get the tab back leaves it with the user, parked as before (its notice stays).
         if (parked) await browser.host.request('tabs.park', { tabId, kind: parked.kind }).catch(() => {});
