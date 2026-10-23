@@ -253,3 +253,43 @@ test('a call that failed as stuck while it waited behind earlier work never star
   await flush();
   assert.equal(started, false, 'the failed call did not run its action after all');
 });
+
+// Measured on Chrome 155 (2026-10-23): a page whose server took 7 s for its next document held Runtime.evaluate those
+// 7 s, as Chrome holds evaluations until the new document commits; agents got "has not answered for 18 s" on such
+// pages and the next call worked. A main-frame document still loading is a navigation, not a stuck script, for up to
+// 60 s.
+test('a page waiting for its next document (a slow server) is not stuck, for up to 60 s; a loop with none loading still is', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const { state, tab } = setup();
+  const page = tab.page;
+  const documentRequest = { url: () => 'https://dev.example/slow', resourceType: () => 'document', frame: () => page, isNavigationRequest: () => true, method: () => 'GET' };
+  page.emit('request', documentRequest);
+  state.stuck = true; // every evaluation waits for the commit
+  let finish;
+  const read = tab.run(() => new Promise((resolve) => { finish = resolve; }));
+  for (let i = 0; i < 3; i++) {
+    await flush();
+    t.mock.timers.tick(STUCK_AFTER_MS);
+    await flush();
+    t.mock.timers.tick(3000);
+  }
+  assert.equal(await settled(read), 'still waiting', 'not failed while its document loads');
+  assert.equal(tab.stuckAt, null);
+  for (let i = 0; i < 3; i++) {
+    await flush();
+    t.mock.timers.tick(STUCK_AFTER_MS);
+    await flush();
+    t.mock.timers.tick(3000);
+  }
+  await assert.rejects(read, STUCK, 'past 60 s the loading document is no excuse');
+  finish('late');
+
+  const other = setup();
+  other.state.stuck = true;
+  const hung = other.tab.run(() => never);
+  await flush();
+  t.mock.timers.tick(STUCK_AFTER_MS);
+  await flush();
+  t.mock.timers.tick(3000);
+  await assert.rejects(hung, STUCK, 'a loop with no document loading is stuck as before');
+});

@@ -308,7 +308,9 @@ honest pages; a page can always show its own field's value, so a page faking its
   the tab's queue behind it, until the host's 120 s. Liveness decides, not per-read timeouts: once a call on a tab has
   had no answer for 15 s, and every 15 s after that, the server asks the page `Runtime.evaluate {expression: "1"}` on
   the tab's own session through the host (an open JS dialog counts as an answer, unasked). Any reply within 3 s means
-  alive (lighthouse, traces, long waits go on); none fails the call ("The page in <tab> has not answered for 18 s: a
+  alive (lighthouse, traces, long waits go on), and so does a main-frame document request still in flight that started
+  less than 60 s ago (Chrome holds evaluations until the next document commits: a server that took 7 s held the probe
+  7 s, measured on Chrome 155, 2026-10-23); none fails the call ("The page in <tab> has not answered for 18 s: a
   script on it seems stuck in a loop (a broken build?). Navigate it (reload, or another URL) or close it with tab_close;
   other calls on this tab fail at once until it answers again."), marks the tab stuck and lets its queue go on (the hung
   call settles on its own, ignored). While marked, a call asks the page again first (1 s): a reply clears the mark, none

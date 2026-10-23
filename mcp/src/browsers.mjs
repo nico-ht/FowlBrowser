@@ -76,6 +76,7 @@ export const NAVIGATION_TIMEOUT_MS = 30_000;
 export const STUCK_AFTER_MS = 15_000;
 const PROBE_MS = 3000;
 const RECHECK_MS = 1000; // a call on a tab found stuck asks again this long before failing at once
+const NAVIGATING_MAX_MS = 2 * NAVIGATION_TIMEOUT_MS; // how long a main-frame document still loading keeps a page from counting as stuck
 
 function appVersion(browserPath) {
   const app = browserPath?.match(/^(.*?\.app)\//)?.[1];
@@ -125,6 +126,7 @@ export class Tab extends EventEmitter {
     // and when the last one started or ended: wait_for's settled wait reads them (tools.mjs pageSettled). A fetch or XHR
     // ends with its response (Chrome never reports an unread body as finished; streams and long polls never finish).
     this.inflight = new Set();
+    this._requestStarts = new WeakMap(); // request in inflight -> when it started (_navigating)
     this.requestAt = 0;
     this.ending = false; // this session is closing or releasing it: its page closing is ours (record mode)
     this.closedByPageAt = null; // when the page called window.close() (popups.mjs)
@@ -166,6 +168,7 @@ export class Tab extends EventEmitter {
       if (!(request.isNavigationRequest() && request.frame() === page.mainFrame())) this.loaded(request.url(), request.resourceType() === 'document');
       if (!RENDERING.has(request.resourceType())) return;
       this.inflight.add(request);
+      this._requestStarts.set(request, Date.now());
       this.requestAt = Date.now();
     });
     page.on('response', (response) => { if (/^(xhr|fetch)$/.test(response.request().resourceType())) ended(response.request()); });
@@ -204,7 +207,7 @@ export class Tab extends EventEmitter {
     let timer, done = false, failed = false;
     const stuck = new Promise((_, reject) => {
       const check = async () => {
-        if (await this._answers(PROBE_MS)) { if (!done) timer = setTimeout(check, STUCK_AFTER_MS); return; }
+        if (await this._answers(PROBE_MS) || this._navigating()) { if (!done) timer = setTimeout(check, STUCK_AFTER_MS); return; }
         if (done) return;
         this.stuckAt ??= began;
         this._busy = null;
@@ -223,6 +226,18 @@ export class Tab extends EventEmitter {
     const answered = !!this.dialog || await within(cdp(this, 'Runtime.evaluate', { expression: '1' }).then(() => true, () => true), ms, false) || !!this.dialog;
     if (answered) this.stuckAt = null;
     return answered;
+  }
+
+  // The main frame waits for its next document (its request is still in flight): Chrome holds every evaluation until
+  // that commits, so a slow server reads like a stuck page. Measured on Chrome 155 (2026-10-23): a page whose server
+  // took 7 s to answer held Runtime.evaluate those 7 s; agents had got the stuck error on such pages 82 times in a week.
+  // Only for NAVIGATING_MAX_MS: a document that takes longer than that is no excuse.
+  _navigating() {
+    const main = this.page.mainFrame();
+    for (const request of this.inflight) {
+      if (request.resourceType() === 'document' && request.frame() === main && Date.now() - (this._requestStarts.get(request) ?? 0) < NAVIGATING_MAX_MS) return true;
+    }
+    return false;
   }
 
   _stuckError() {
