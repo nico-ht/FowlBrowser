@@ -11,7 +11,7 @@ import { cdp, clearEmulation, fileTab, isUsersTab, onCdpEvent, outputDir, readSt
 import { debug } from './debug.mjs';
 import { POPUP_BINDING, POPUP_WORLD, popupsInstalled } from './popups.mjs';
 import { notice, USER_BINDING, USER_WORLD } from './takeover.mjs';
-import { resetEngine, tracedTabOnly } from './trace.mjs';
+import { blank, resetEngine, tracedTabOnly } from './trace.mjs';
 import { clearViewport, setMedia, setViewport } from './viewport.mjs';
 
 const CATEGORIES = ['performance', 'accessibility', 'best-practices', 'seo', 'agentic-browsing'];
@@ -183,9 +183,11 @@ const load = () => loading ??= (async () => {
   logger.default.setLevel(process.env.FOWLBROWSER_LH_LOG || 'error');
   return { navigation: lighthouse.navigation, snapshot: lighthouse.snapshot, generateReport: lighthouse.generateReport, desktopConfig: lighthouse.desktopConfig, mobileUA: userAgents.mobile };
 })();
+export const auditor = { load }; // for tests: a stand-in Lighthouse
 
 async function run(tab, lh, { device, mode, categories }) {
-  const flags = { disableStorageReset: true, skipAudits: SKIP_AUDITS, logLevel: process.env.FOWLBROWSER_LH_LOG || 'error', maxWaitForLoad: 30_000 }; // 30 s as chrome-devtools-mcp; the level: Lighthouse sets its logger from it
+  // skipAboutBlank: the page goes to about:blank itself before a navigation run (trace.mjs blank), not through the debugger.
+  const flags = { disableStorageReset: true, skipAboutBlank: true, skipAudits: SKIP_AUDITS, logLevel: process.env.FOWLBROWSER_LH_LOG || 'error', maxWaitForLoad: 30_000 }; // 30 s as chrome-devtools-mcp; the level: Lighthouse sets its logger from it
   if (categories) flags.onlyCategories = categories;
   let config;
   if (device === 'desktop') config = lh.desktopConfig;
@@ -227,6 +229,12 @@ async function run(tab, lh, { device, mode, categories }) {
     await root.send('Network.enable');
     await root.send('Network.setCacheDisabled', { cacheDisabled: true });
     takenOver(); // the set-up above awaited the browser: a navigation run would otherwise replace the user's page
+    // Lighthouse audits web pages only: any other (a local file) it refuses (INVALID_URL) before it does anything, so that
+    // one is left as it is.
+    if (mode === 'navigation' && /^https?:/i.test(url)) {
+      await blank(tab);
+      takenOver();
+    }
     // Lighthouse waits for trace and page events that never come once the browser's connection is gone.
     let onClose;
     const closed = new Promise((_, reject) => { onClose = () => reject(new Error('The browser\'s FowlBrowser connection closed during the audit (the tab is no longer controlled).')); tab.browser.host.once('close', onClose); });
@@ -309,7 +317,7 @@ export function formatResult(lhr, { device, mode, seconds, html, json }) {
   return lines.join('\n');
 }
 
-export function registerLighthouse(tool, manager, { withTab, header, text, tabArg }) {
+export function registerLighthouse(tool, manager, { withTab, header, text, tabArg, refuseBlockedPage }) {
   tool('lighthouse',
     'Run a Lighthouse audit in a tab: scores (0-100) for performance, accessibility, best practices, SEO and agentic browsing, ' +
     'the lab metrics (FCP, LCP, TBT, CLS, Speed Index, TTI), the failed or flagged audits heaviest first, and the paths of the full HTML and JSON reports. ' +
@@ -324,16 +332,20 @@ export function registerLighthouse(tool, manager, { withTab, header, text, tabAr
       categories: z.array(z.enum(CATEGORIES)).min(1).optional().describe('Only these categories (default all five).'),
     },
     withTab(async (tab, { device = 'mobile', mode = 'navigation', categories }) => {
+      const before = tab.blockedPageAt; // before any wait: a refused file loaded during the audit voids it
       // The page answers none of the audit's reads while a dialog blocks it.
       if (tab.dialog) throw new Error('A dialog is open on this tab; resolve it with the dialog tool first.');
       if (mode === 'navigation' && await isUsersTab(tab)) {
         throw new Error(`Tab ${tab.id} is the user's own tab (you claimed it, or it is kept or handed over to them): mode "navigation" reloads the page, so it was not run. ` +
           'Audit a tab_open of the URL instead, or use mode "snapshot" to audit the page as it is.');
       }
-      const lh = await load();
+      const lh = await auditor.load();
       const started = Date.now();
       const { lhr, warnings } = await run(tab, lh, { device, mode, categories });
       const seconds = (Date.now() - started) / 1000;
+      // The page showed, framed or loaded a refused local file during the audit (or does now): the gathered nodes,
+      // snippets and screenshots may hold it, so no report is made or written.
+      refuseBlockedPage(tab, before);
       // Tracing is one per browser: a trace_start recording or DevTools' Performance panel in any tab blocks it.
       const tail = warnings.length ? `\n${warnings.join('\n')}` : '';
       if (lhr.runtimeError?.code === 'TRACING_ALREADY_STARTED') throw new Error(`${TRACE_BUSY}${tail}`);

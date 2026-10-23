@@ -163,7 +163,10 @@ test('the traced tab\'s summary and every insight are the same before and after 
 const clickTrace = zlib.gunzipSync(fs.readFileSync(new URL('./fixtures/trace-click.json.gz', import.meta.url))).toString('utf8');
 const tools = {};
 registerTrace((name, description, shape, handler) => { tools[name] = handler; }, null,
-  { withTab: (handler) => handler, header: async () => 'Tab: chrome:1', text: (body) => body, tabArg: undefined });
+  { withTab: (handler) => handler, header: async () => 'Tab: chrome:1', text: (body) => body, tabArg: undefined,
+    // As tools.mjs's, over blockedPageAt alone (these tabs show a web page).
+    blockedSince: (tab, before) => tab.blockedPageAt !== before,
+    refuseBlockedPage: (tab, before) => { if (before !== undefined && tab.blockedPageAt !== before) throw new Error(`Tab ${tab.id}: discarded.`); } });
 
 // As Chrome streams it (streamCompression gzip), with another tab's renderer process in it.
 const clickTraceGz = zlib.gzipSync(JSON.stringify((({ traceEvents, ...rest }) => ({ ...rest, traceEvents: [...traceEvents, ...otherRenderer] }))(JSON.parse(clickTrace))));
@@ -194,6 +197,8 @@ function fakeTab(fail = {}) {
   page.gotos = [];
   page.url = () => 'http://127.0.0.1/perf.html';
   page.goto = async (u) => { page.gotos.push(u); };
+  // The page's own way to about:blank (trace.mjs blank): Runtime.evaluate, then this wait, which marks it in sent.
+  page.waitForURL = async (u) => { sent.push(`waitForURL ${u}`); };
   return { id: 'chrome:1', tabId: 1, page, browser: { host }, sent, params };
 }
 
@@ -210,7 +215,7 @@ test('trace_start takes the slot first; a busy browser is waited for on the page
   held();
   assert.match(await started, /^Chrome records one trace at a time and something else kept recording/);
   assert.ok(tab.sent.filter((c) => c === 'Tracing.start').length >= 3, `retried (${tab.sent.length} sends)`);
-  assert.deepEqual(tab.page.gotos, [], 'the page was never blanked');
+  assert.ok(!tab.sent.includes('Runtime.evaluate') && !tab.page.gotos.length, 'the page was never blanked');
   assert.equal(tab.page.listenerCount('close'), 0);
   assert.ok(!tab.trace?.startedAt);
   assert.notEqual(await slotIsFree(), null, 'slot released');
@@ -219,10 +224,10 @@ test('trace_start takes the slot first; a busy browser is waited for on the page
 test('trace_start: busy at first, then free: the empty probe trace ends, the page is blanked and the recording starts gzipped', async () => {
   const tab = fakeTab({ 'Tracing.start': (n) => (n < 3 ? BUSY : undefined) });
   assert.match(await tools.trace_start(tab, { reload: true, auto_stop: false }), /Trace recording \(page reloaded\)\./);
-  assert.deepEqual(tab.sent, ['Tracing.start', 'Tracing.start', 'Tracing.start', 'Tracing.end', 'IO.close', 'Tracing.start']);
+  assert.deepEqual(tab.sent, ['Tracing.start', 'Tracing.start', 'Tracing.start', 'Tracing.end', 'IO.close', 'Runtime.evaluate', 'waitForURL about:blank', 'Tracing.start']);
   assert.deepEqual(tab.params[0].traceConfig, { includedCategories: ['__metadata'], excludedCategories: ['*'] });
-  assert.equal(tab.params[5].streamCompression, 'gzip');
-  assert.deepEqual(tab.page.gotos, ['about:blank', 'http://127.0.0.1/perf.html']);
+  assert.equal(tab.params[6].streamCompression, 'gzip');
+  assert.deepEqual(tab.page.gotos, ['http://127.0.0.1/perf.html']);
   tab.trace.waitedMs = 3000;
   const out = await tools.trace_stop(tab);
   const file = /^File: (\S+)/m.exec(out)[1];
@@ -234,8 +239,40 @@ test('trace_start: busy at first, then free: the empty probe trace ends, the pag
   assert.notEqual(await slotIsFree(), null, 'slot released');
 });
 
+// Measured on a test Mac (Chrome 155, Helium 155, 2026-10-19): about:blank the debugger opens has the extension's origin
+// and lives in the extension's renderer, so the reload commits in another process, under load one Chrome starts during the
+// recording, whose navigationStart is lost (NO_NAVIGATION only). One the page opens itself keeps its renderer for both.
+test('trace_start blanks the page from the page itself, never through the debugger, then reloads the URL while recording', async () => {
+  const tab = fakeTab();
+  await tools.trace_start(tab, { reload: true, auto_stop: false });
+  assert.deepEqual(tab.sent.slice(-3), ['Runtime.evaluate', 'waitForURL about:blank', 'Tracing.start'], 'blank and loaded before the recording starts');
+  assert.equal(tab.params[tab.sent.indexOf('Runtime.evaluate')].expression, 'location.replace("about:blank")');
+  assert.deepEqual(tab.page.gotos, ['http://127.0.0.1/perf.html'], 'no debugger navigation to about:blank; the reload after the start');
+  fs.rmSync(/^File: (\S+)/m.exec(await tools.trace_stop(tab))[1]);
+});
+
+test('trace_start: a page that does not go to about:blank itself (its script failed or got no answer, or a handler cancels it) is blanked the debugger\'s way', async () => {
+  for (const refuses of ['exception', 'no answer', 'no navigation']) {
+    const tab = fakeTab();
+    const request = tab.browser.host.request;
+    tab.browser.host.request = async (method, args) => {
+      if (args?.[1] !== 'Runtime.evaluate' || refuses === 'no navigation') return request(method, args);
+      tab.sent.push('Runtime.evaluate');
+      tab.params.push(args[2]);
+      if (refuses === 'no answer') throw new Error('Runtime.evaluate timed out after 30 s');
+      return { exceptionDetails: { text: 'Uncaught' } };
+    };
+    if (refuses === 'no navigation') tab.page.waitForURL = async (u) => { tab.sent.push(`waitForURL ${u}`); throw new Error('Timeout 5000ms exceeded.'); };
+    await tools.trace_start(tab, { reload: true, auto_stop: false });
+    assert.deepEqual(tab.page.gotos, ['about:blank', 'http://127.0.0.1/perf.html'], refuses);
+    assert.equal(tab.sent.at(-1), 'Tracing.start', refuses);
+    fs.rmSync(/^File: (\S+)/m.exec(await tools.trace_stop(tab))[1]);
+  }
+});
+
 test('trace_start: a blank navigation that fails after it began (the page may have changed) is undone too', async () => {
   const tab = fakeTab();
+  tab.page.waitForURL = async () => { throw new Error('Timeout 5000ms exceeded.'); };
   tab.page.goto = async (u) => { tab.page.gotos.push(u); if (u === 'about:blank') throw new Error('load wait timed out'); };
   await assert.rejects(tools.trace_start(tab, { reload: true, auto_stop: false }), /load wait timed out/);
   assert.deepEqual(tab.page.gotos, ['about:blank', 'http://127.0.0.1/perf.html']);
@@ -276,7 +313,7 @@ test('trace_start: a tab that closed while the start was underway is let go of a
 test('trace_start: a start failing after the page was blanked releases the slot and goes back', async () => {
   const tab = fakeTab({ 'Tracing.start': (n) => (n === 2 ? 'boom' : undefined) });
   await assert.rejects(tools.trace_start(tab, { reload: true, auto_stop: false }), /boom/);
-  assert.deepEqual(tab.page.gotos, ['about:blank', 'http://127.0.0.1/perf.html']);
+  assert.deepEqual(tab.page.gotos, ['http://127.0.0.1/perf.html']);
   assert.ok(!tab.trace?.startedAt);
   assert.notEqual(await slotIsFree(), null, 'slot released');
 });
@@ -299,10 +336,35 @@ test('trace_stop end to end: summary and file, and the close listener goes with 
 test('trace_stop: a recording during which the tab showed a local file is discarded, not saved', async () => {
   const tab = fakeTab();
   assert.match(await tools.trace_start(tab, { reload: false, auto_stop: false }), /Trace recording\./);
-  tab.localPageAt = Date.now(); // history back into a local file page, then away again
-  await assert.rejects(tools.trace_stop(tab), /showed a local file during the recording.*trace was discarded/);
+  tab.blockedPageAt = Date.now(); // history back into a local file page, then away again
+  await assert.rejects(tools.trace_stop(tab), /showed or loaded a local file agents can't open during the recording.*trace was discarded/);
   assert.ok(!tab.trace.startedAt && !tab.trace.last, 'nothing kept');
   assert.equal(tab.page.listenerCount('close'), 0);
+  assert.equal(await slotState(), 'free', 'slot released');
+});
+
+test('trace_start: a refused file the page loads while the recording is set up voids it, auto-stop or not', async () => {
+  for (const autoStop of [true, false]) {
+    const tab = fakeTab();
+    tab.blockedPageAt = 5;
+    const request = tab.browser.host.request;
+    tab.browser.host.request = async (method, args) => {
+      if (args?.[1] === 'Tracing.start') tab.blockedPageAt = 6; // a timer loads a refused <script> while Chrome starts
+      return request(method, args);
+    };
+    await assert.rejects(tools.trace_start(tab, { reload: false, auto_stop: autoStop, seconds: 0.01 }), /discarded/);
+    assert.deepEqual(tab.sent, ['Tracing.start', 'Tracing.end', 'IO.read', 'IO.close'], 'the recording was ended');
+    assert.ok(!tab.trace.startedAt && !tab.trace.last, 'nothing kept');
+    assert.equal(await slotState(), 'free', 'slot released');
+  }
+});
+
+test('trace_start with auto-stop: a refused file loaded during the recording discards it at the stop', async () => {
+  const tab = fakeTab();
+  tab.blockedPageAt = 5;
+  setTimeout(() => { tab.blockedPageAt = 6; }, 10);
+  await assert.rejects(tools.trace_start(tab, { reload: false, seconds: 0.05 }), /during the recording.*trace was discarded/);
+  assert.ok(!tab.trace.startedAt && !tab.trace.last, 'nothing kept');
   assert.equal(await slotState(), 'free', 'slot released');
 });
 

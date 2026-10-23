@@ -5,10 +5,11 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import zlib from 'node:zlib';
 import { z } from 'zod';
+import { debug } from './debug.mjs';
 import { cdp, cdpEvent, fileTab, isUsersTab, outputDir, readStream, stamp, startTracing, traceBusy, tracingSlot, waitForTracing } from './perf.mjs';
 import { cap } from './snapshots.mjs';
 import { notice } from './takeover.mjs';
-import { sleep } from './util.mjs';
+import { sleep, within } from './util.mjs';
 
 const INSIGHT_MAX_CHARS = 20_000;
 const gunzip = promisify(zlib.gunzip);
@@ -424,7 +425,7 @@ async function stopRecording(tab) {
   }
 }
 
-async function stop(tab, header, text) {
+async function stop(tab, { header, text, blockedSince }) {
   if (!tab.trace?.startedAt) throw new Error('No trace is recording in this tab. Call trace_start first.');
   // A tab closing from here on ends the recording through this stop (endRecording releases): never mid-parse.
   tab.page.off('close', tab.trace.release);
@@ -442,10 +443,13 @@ async function stop(tab, header, text) {
     tab.page.on('close', tab.trace.release);
     throw new Error(`Chrome did not stop the recording: ${error.message.replace(/\.$/, '')}. Call trace_stop again.`);
   }
-  // The tab showed a local file while it recorded: its screenshots and sources may hold the file, so nothing is kept.
-  if (tab.localPageAt >= tab.trace.startedAt) {
+  // The tab showed, framed or loaded (an <img>, a <script>: browsers.mjs Tab.loaded) a refused local file while it
+  // recorded, or while the recording was set up (trace.before, read as trace_start began): its screenshots and sources
+  // may hold the file, so nothing is kept.
+  if (blockedSince(tab, tab.trace.before)) {
     endRecording(tab);
-    throw new Error('The tab showed a local file during the recording, which FowlBrowser doesn\'t record, so the trace was discarded. Start a new one on a web page.');
+    throw new Error('The tab showed or loaded a local file agents can\'t open during the recording, which FowlBrowser doesn\'t record, so the trace was discarded. ' +
+      'Start a new one on a web page or an allowed local file.');
   }
   try {
     const { gz, dataLoss } = recording;
@@ -461,6 +465,24 @@ async function stop(tab, header, text) {
   }
 }
 
+// Before a page-load trace (and a Lighthouse navigation run) the page itself goes to about:blank, so the blank page stays
+// in the page's renderer process (with its origin) and the reload commits there too: a process recording from the
+// start. A blank page the debugger opens takes the extension's origin (Chrome counts the extension as the navigation's
+// initiator) and lives in the extension's process, so the reload then needs another renderer: Chrome's spare one, which
+// a busy browser lacks, and one started during the recording loses its first events, the load's navigationStart among
+// them (the trace engine then finds no page load, NO_NAVIGATION only; Lighthouse fails with NO_NAVSTART). No page script
+// runs for it (location can't be overridden; the reply comes before the navigation commits). A page that doesn't go
+// within BLANK_MS (a busy main thread, a navigate handler that cancels it) is blanked the debugger's way, as before.
+const BLANK_MS = 5000;
+export async function blank(tab) {
+  const deadline = Date.now() + BLANK_MS;
+  const evaluated = await within(cdp(tab, 'Runtime.evaluate', { expression: 'location.replace("about:blank")' }), BLANK_MS, null);
+  if (evaluated && !evaluated.exceptionDetails
+    && await tab.page.waitForURL('about:blank', { waitUntil: 'load', timeout: Math.max(1, deadline - Date.now()) }).then(() => true, () => false)) return;
+  debug('blank: the page did not go to about:blank itself', tab.id);
+  await tab.page.goto('about:blank', { waitUntil: 'load' });
+}
+
 function endRecording(tab) {
   tab.trace.startedAt = null;
   if (tab.trace.release) tab.page.off('close', tab.trace.release);
@@ -468,7 +490,8 @@ function endRecording(tab) {
   tab.trace.release = null;
 }
 
-export function registerTrace(tool, manager, { withTab, header, text, tabArg }) {
+export function registerTrace(tool, manager, helpers) {
+  const { withTab, header, text, tabArg, refuseBlockedPage } = helpers;
   tool('trace_start',
     'Record a performance trace of a tab, as DevTools\' Performance panel does (timeline, JS samples, screenshots), and analyze it with DevTools\' own insights: ' +
     'LCP with its subparts, INP, CLS, long tasks, and what fails (render-blocking requests, image delivery, caching, DOM size, third parties, layout shift culprits...). ' +
@@ -482,6 +505,7 @@ export function registerTrace(tool, manager, { withTab, header, text, tabArg }) 
     },
     withTab(async (tab, { reload = true, auto_stop: autoStop = true, seconds = 5 }) => {
       if (tab.trace?.startedAt) throw new Error('A trace is already recording in this tab. Call trace_stop to end it.');
+      const before = tab.blockedPageAt; // before any wait: a refused file the page loads during the set-up is seen too
       const url = tab.page.url();
       if (reload && await isUsersTab(tab)) {
         throw new Error('This is the user\'s own tab, so it was not reloaded. Open the URL in your own tab (tab_open) and trace there, or pass reload false to record the page as it is.');
@@ -500,7 +524,7 @@ export function registerTrace(tool, manager, { withTab, header, text, tabArg }) 
           waitedMs = await waitForTracing(tab);
           takenOver();
           blanked = true; // from here the page may have changed, even if the load wait fails
-          await tab.page.goto('about:blank', { waitUntil: 'load' });
+          await blank(tab);
         }
         // As puppeteer records (what chrome-devtools-mcp uses): a 1.2 GB buffer, so a busy page's load is not cut short.
         // Gzipped by Chrome: many times fewer bytes through the extension and the host (a 39 MB trace is 2.8 MB).
@@ -515,12 +539,13 @@ export function registerTrace(tool, manager, { withTab, header, text, tabArg }) 
         }
         throw error;
       }
-      tab.trace = { ...tab.trace, startedAt: Date.now(), url, release, waitedMs };
+      tab.trace = { ...tab.trace, startedAt: Date.now(), before, url, release, waitedMs }; // before, not startedAt, decides the stop's discard
       tab.page.on('close', release); // a closed tab ends Chrome's recording too; endRecording removes it
       if (tab.page.isClosed?.()) { endRecording(tab); throw new Error('The tab closed while the trace started.'); } // closed before the listener
       try {
         takenOver(); // during the start: the recording ends, the user's page is left alone
         if (reload) await tab.page.goto(url, { waitUntil: 'load' });
+        refuseBlockedPage(tab, before); // it loaded a refused file while the recording was set up: it is ended unkept
       } catch (error) {
         // A recording still live because its end was refused stays tracked, with the slot: trace_stop ends it (or
         // its tab's close). One Chrome did stop (the trace itself was lost) or whose tab is gone is let go of.
@@ -537,14 +562,14 @@ export function registerTrace(tool, manager, { withTab, header, text, tabArg }) 
         return text(`${await header(tab)}\nTrace recording${reload ? ' (page reloaded)' : ''}. Do what you want to measure, then call trace_stop.`);
       }
       await sleep(seconds * 1000);
-      return stop(tab, header, text);
+      return stop(tab, helpers);
     }));
 
   tool('trace_stop',
     'Stop the trace recording in a tab (started by trace_start with auto_stop false), save it and return the analysis: LCP with subparts, INP, CLS, long tasks, ' +
     'failing insights with estimated savings, and the path of the trace file. Then trace_insight gives the details of one insight.',
     { tab: tabArg },
-    withTab((tab) => stop(tab, header, text)));
+    withTab((tab) => stop(tab, helpers)));
 
   tool('trace_insight',
     'Details of one insight from the tab\'s last trace (trace_start or trace_stop): what it checks, its state, estimated savings, and its data, ' +
