@@ -40,7 +40,8 @@ foreach ($sid in @($me.Value, 'S-1-5-18', 'S-1-5-32-544')) {
 [System.IO.Directory]::SetAccessControl($target, $acl)
 `;
   execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-    windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'],
+    // Updating inherited ACLs on an existing runtime can touch many dependency files.
+    windowsHide: true, timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, FOWLBROWSER_ACL_TARGET: resolved },
   });
   return resolved;

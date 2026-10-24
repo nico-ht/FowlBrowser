@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { endpoint } from '../src/platform.mjs';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-mcp-'));
 const TOKEN = 'secret-token';
@@ -53,7 +54,9 @@ const server = net.createServer((socket) => {
     }
   });
 });
-await new Promise((resolve) => server.listen(path.join(dir, 'helium.sock'), resolve));
+const heliumSocket = path.join(dir, 'helium.sock');
+await new Promise((resolve) => server.listen(endpoint(heliumSocket), resolve));
+if (process.platform === 'win32') fs.writeFileSync(heliumSocket, 'test', 'utf8');
 
 // A browser whose socket dies after the client.hello reply, before extension.initialized: it must not
 // hold up the server or the healthy browser.
@@ -64,7 +67,9 @@ const broken = net.createServer((socket) => {
     else if (message.method === 'client.hello') socket.end(frame({ id: message.id, result: { ok: true } }));
   });
 });
-await new Promise((resolve) => broken.listen(path.join(dir, 'chrome.sock'), resolve));
+const chromeSocket = path.join(dir, 'chrome.sock');
+await new Promise((resolve) => broken.listen(endpoint(chromeSocket), resolve));
+if (process.platform === 'win32') fs.writeFileSync(chromeSocket, 'test', 'utf8');
 
 const client = new Client({ name: 'unit', version: '0' });
 await client.connect(new StdioClientTransport({

@@ -10,6 +10,11 @@ if (process.platform !== 'win32') throw new Error('Use sh install.sh on macOS');
 const [major, minor] = process.versions.node.split('.').map(Number);
 if (major < 22 || (major === 22 && minor < 19)) throw new Error('Node.js 22.19 or newer is required');
 execFileSync('git', ['--version'], { stdio: 'ignore', windowsHide: true });
+const browserFlag = process.argv.indexOf('--browser');
+const selectedBrowser = browserFlag < 0 ? null : process.argv[browserFlag + 1];
+if (browserFlag >= 0 && !['chrome', 'edge', 'brave', 'chromium'].includes(selectedBrowser)) {
+  throw new Error('--browser must be chrome, edge, brave or chromium');
+}
 const source = path.dirname(fileURLToPath(import.meta.url));
 // Store outside redirected AppData: packaged Codex and external browsers must see the same files.
 const base = path.join(os.homedir(), 'Documents', 'FowlBrowserRuntime');
@@ -39,7 +44,8 @@ const candidates = [
   { key: 'brave', name: 'Brave', exe: 'BraveSoftware/Brave-Browser/Application/brave.exe', profile: 'BraveSoftware/Brave-Browser/User Data', registry: 'BraveSoftware\\Brave-Browser', page: 'brave://extensions' },
   { key: 'chromium', name: 'Chromium', exe: 'Chromium/Application/chrome.exe', profile: 'Chromium/User Data', registry: 'Chromium', page: 'chrome://extensions' },
 ];
-const browsers = candidates.filter((browser) => roots.some((root) => fs.existsSync(path.join(root, browser.exe))) || fs.existsSync(path.join(process.env.LOCALAPPDATA, browser.profile)));
+const browsers = candidates.filter((browser) => (!selectedBrowser || browser.key === selectedBrowser) &&
+  (roots.some((root) => fs.existsSync(path.join(root, browser.exe))) || fs.existsSync(path.join(process.env.LOCALAPPDATA, browser.profile))));
 const quote = (value) => '"' + value.replaceAll('%', '%%') + '"';
 const registrations = [];
 for (const browser of browsers) {

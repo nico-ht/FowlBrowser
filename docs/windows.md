@@ -6,6 +6,10 @@ Requires Git and Node.js 22.19 or newer. Run from this checkout:
 node install-windows.mjs
 ```
 
+To install or update only Chrome, use `node install-windows.mjs --browser chrome`.
+After an update, reload the extension with `node tools/fb.mjs -b chrome reload-if-idle`.
+This reports that a later attempt is needed if agents still own tabs; it does not interrupt them.
+
 The installer creates a versioned runtime under `Documents\FowlBrowserRuntime`,
 keeps the unpacked extension at `Documents\FowlBrowserRuntime\extension`,
 and registers the native host in HKCU for detected Chrome, Edge, Brave and Chromium installations.
