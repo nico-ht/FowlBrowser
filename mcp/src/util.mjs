@@ -13,6 +13,7 @@ const DATA_VOLUME = '/System/Volumes/Data/';
 // The Data volume's firmlinks name the same folders: /System/Volumes/Data/Users/me/Downloads is /Users/me/Downloads.
 const unalias = (real) => (real.startsWith(DATA_VOLUME) ? real.slice(DATA_VOLUME.length - 1) : real);
 export function localFileRefusal(real, home = os.homedir()) {
+  if (process.platform === 'win32') return 'local file access is not yet supported by the Windows port';
   const library = path.join(unalias(fs.realpathSync.native(home)), 'Library');
   const refusedDirs = [library, '/etc', '/private/etc', '/System', '/private/var/db', '/Library/Keychains', '/private/var/log'];
   const cloudDirs = [path.join(library, 'Mobile Documents'), path.join(library, 'CloudStorage')];
@@ -49,6 +50,7 @@ function quarantined(real, stat) {
 export function localFileBlock(url, home = os.homedir(), { document = true } = {}) {
   const parsed = URL.parse(url ?? '');
   if (parsed?.protocol !== 'file:') return undefined;
+  if (process.platform === 'win32') return 'local file access is not yet supported by the Windows port';
   if (parsed.host) return `it is on another computer (${parsed.host})`;
   let real;
   try {

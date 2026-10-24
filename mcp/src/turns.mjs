@@ -114,6 +114,8 @@ export async function endTurn(manager) {
 
 // Lines from bin/turn-ended.mjs: turn_ended (Stop), subagent_start, subagent_stop. Concurrent turn ends share one run.
 export function listenForTurns(manager, socketPath = turnSocketPath()) {
+  // The macOS hook has no Windows peer-identity checks. Session-end cleanup remains active.
+  if (process.platform === 'win32') return null;
   if (!socketPath) return null;
   let running = null;
   const run = () => (running ??= endTurn(manager).finally(() => { running = null; }));

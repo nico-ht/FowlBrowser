@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { privateWindowsDirectory } from './platform.mjs';
 import { cdp } from './cdp.mjs';
 import { registerLighthouse } from './lighthouse.mjs';
 import { registerTrace } from './trace.mjs';
@@ -123,13 +124,14 @@ export async function isUsersTab(tab) {
 // Where big results go: os.tmpdir()/fowlbrowser-<kind>/, created for this user only. stamp(): 20261011-131500-123 (ms);
 // with the tab id ("chrome-52") in the name, two measurements never share a file.
 export function outputDir(kind) {
-  return privateDir(path.join(os.tmpdir(), `fowlbrowser-${kind}`));
+  return privateDir(path.join(fs.realpathSync.native(os.tmpdir()), `fowlbrowser-${kind}`));
 }
 
 // mkdir's mode does nothing to a folder that is already there: in a shared /tmp (TMPDIR unset) another user may have
 // made it first, or put a symlink there. Ours that others could only read (older versions made the exports one 0755)
 // is made private; one others could write to may hold their files, so it is refused like theirs.
 export function privateDir(dir) {
+  if (process.platform === 'win32') return privateWindowsDirectory(dir);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const stat = fs.lstatSync(dir);
   if (!stat.isDirectory() || stat.uid !== process.getuid() || stat.mode & 0o022) {

@@ -483,7 +483,7 @@ export class Browser {
 export class BrowserManager {
   // system: the installed and running browsers (macOS). Real browsers' hosts listen in ~/.fowlbrowser only, so with
   // another FOWLBROWSER_DIR (tests, the fake extension) none of them is looked at or reopened.
-  constructor({ system = SOCKET_DIR === path.join(os.homedir(), '.fowlbrowser') ? macOS : null } = {}) {
+  constructor({ system = process.platform === 'darwin' && SOCKET_DIR === path.join(os.homedir(), '.fowlbrowser') ? macOS : null } = {}) {
     this.browsers = new Map(); // key -> Browser
     this._connecting = new Map(); // socket path -> promise
     this._system = system;

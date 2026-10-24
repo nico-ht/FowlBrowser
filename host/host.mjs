@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { endpoint, privateWindowsDirectory } from '../mcp/src/platform.mjs';
 
 const DIR = process.env.FOWLBROWSER_DIR || path.join(os.homedir(), '.fowlbrowser');
 const LOG_LIMIT = 5 * 1024 * 1024;
@@ -31,8 +32,8 @@ const ps = (field) => {
   try { return execFileSync('ps', ['-o', `${field}=`, '-p', String(browserPid)], { encoding: 'utf8' }).trim(); }
   catch { return ''; }
 };
-const browserPath = ps('comm');
-const browserArgs = ps('args');
+const browserPath = process.platform === 'win32' ? (process.env.FOWLBROWSER_BROWSER || 'chromium') : ps('comm');
+const browserArgs = process.platform === 'win32' ? '' : ps('args');
 const browser = browserNameFrom(browserPath);
 const silentDebugger = browserArgs.includes('--silent-debugger-extension-api');
 
@@ -50,8 +51,9 @@ function browserNameFrom(p) {
 
 // --- Logging ---
 
+if (process.platform === 'win32') privateWindowsDirectory(DIR);
 fs.mkdirSync(path.join(DIR, 'logs'), { recursive: true, mode: 0o700 });
-fs.chmodSync(DIR, 0o700);
+if (process.platform !== 'win32') fs.chmodSync(DIR, 0o700);
 const logFile = path.join(DIR, 'logs', `${browser}.log`);
 
 function log(...parts) {
@@ -332,7 +334,8 @@ function onClient(socket) {
 // Resolves true if a live server answers on this path.
 function isLive(socketPath) {
   return new Promise((resolve) => {
-    const probe = net.connect(socketPath);
+    const probe = net.connect(endpoint(socketPath));
+    probe.setTimeout(1000, () => { probe.destroy(); resolve(false); });
     probe.once('connect', () => { probe.destroy(); resolve(true); });
     probe.once('error', () => resolve(false));
   });
@@ -353,13 +356,15 @@ async function listen() {
       fs.rmSync(socketPath, { force: true });
     }
     const server = net.createServer(onClient);
-    const ok = await new Promise((resolve) => {
-      server.once('error', () => resolve(false)); // lost a race for this name: try the next one
-      server.listen(socketPath, () => resolve(true));
+    const ok = await new Promise((resolve, reject) => {
+      server.once('error', (error) => error.code === 'EADDRINUSE' ? resolve(false) : reject(error));
+      server.listen(endpoint(socketPath), () => resolve(true));
     });
     if (!ok) continue;
-    fs.chmodSync(socketPath, 0o600);
-    return { server, socketPath };
+    const marker = crypto.randomUUID();
+    if (process.platform === 'win32') fs.writeFileSync(socketPath, marker, 'utf8');
+    else fs.chmodSync(socketPath, 0o600);
+    return { server, socketPath, marker };
   }
 }
 
@@ -371,7 +376,10 @@ function shutdown(reason) {
     listening.server.close();
     // Only remove the socket file if it is still ours (inode unchanged).
     try {
-      if (fs.statSync(listening.socketPath).ino === listening.ino) fs.rmSync(listening.socketPath);
+      const ours = process.platform === 'win32'
+        ? fs.readFileSync(listening.socketPath, 'utf8') === listening.marker
+        : fs.statSync(listening.socketPath).ino === listening.ino;
+      if (ours) fs.rmSync(listening.socketPath);
     } catch {}
   }
   process.exit(0);

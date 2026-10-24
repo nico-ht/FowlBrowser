@@ -55,6 +55,9 @@ How we tested and how to run it yourself: [docs/benchmarks.md](docs/benchmarks.m
 
 ## Install
 
+**Windows fork:** see [Windows setup and current limitations](docs/windows.md).
+The macOS installer below is unchanged.
+
 You need a Mac, [Node.js](https://nodejs.org) 22.19 or newer, and Google Chrome or [Helium](https://helium.computer).
 
 ### The easy way: ask your agent

@@ -5,6 +5,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { debug, debugging } from './debug.mjs';
+import { endpoint } from './platform.mjs';
 
 export const SOCKET_DIR = process.env.FOWLBROWSER_DIR || path.join(os.homedir(), '.fowlbrowser');
 const CONNECT_TIMEOUT_MS = 10_000;
@@ -37,7 +38,7 @@ export class HostClient extends EventEmitter {
 
   async connect(label) {
     const token = fs.readFileSync(path.join(SOCKET_DIR, 'token'), 'utf8').trim();
-    this._socket = net.connect(this.socketPath);
+    this._socket = net.connect(endpoint(this.socketPath));
     this._socket.on('data', (chunk) => this._onData(chunk));
     this._socket.on('close', () => this._onClose());
     this._socket.on('error', () => this._socket.destroy());

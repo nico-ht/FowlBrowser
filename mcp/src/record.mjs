@@ -6,6 +6,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 import { redactArgs } from './debug.mjs';
+import { privateWindowsDirectory } from './platform.mjs';
 
 const MAX_FRAMES = 400;
 // Record mode only (rounds): a busy browser answers the overlay's state in seconds, and a point without it would read
@@ -28,6 +29,7 @@ function shortArgs(value) {
 // frame(tab) captures the next frame.
 // Frames show the user's pages: the folder and files are this user's alone.
 export function openJournal(dir) {
+  if (process.platform === 'win32') privateWindowsDirectory(dir);
   fs.mkdirSync(path.join(dir, 'frames'), { recursive: true, mode: 0o700 });
   for (const folder of [dir, path.join(dir, 'frames')]) fs.chmodSync(folder, 0o700); // mkdir's mode skips existing ones
   const file = path.join(dir, 'journal.jsonl');

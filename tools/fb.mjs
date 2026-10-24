@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { endpoint } from '../mcp/src/platform.mjs';
 
 const DIR = process.env.FOWLBROWSER_DIR || path.join(os.homedir(), '.fowlbrowser');
 const LABEL = process.env.FOWLBROWSER_LABEL || 'fb';
@@ -32,7 +33,7 @@ if (command === 'list') {
 }
 
 function socketPath() {
-  if (target?.includes('/')) return target;
+  if (target && path.isAbsolute(target)) return target;
   if (target) return path.join(DIR, `${target}.sock`);
   const found = sockets();
   if (found.length !== 1) {
@@ -42,7 +43,7 @@ function socketPath() {
   return path.join(DIR, found[0]);
 }
 
-const socket = net.connect(socketPath());
+const socket = net.connect(endpoint(socketPath()));
 socket.on('error', (error) => { console.error(error.message); process.exit(1); });
 
 function send(message) {

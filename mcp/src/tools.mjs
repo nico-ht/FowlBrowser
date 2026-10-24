@@ -142,6 +142,7 @@ const MAX_FOLDER_ENTRIES = 10_000;
 // Finder writes these into folders it shows: view settings, no content. A folder holding them uploads as before.
 const FINDER_FILES = new Set(['.DS_Store', '.localized']);
 export function uploadPaths(paths, home = os.homedir(), ids = null) {
+  if (process.platform === 'win32') throw new Error('File uploads are not yet supported by the Windows port. Use the browser upload control yourself.');
   // Why a resolved path can't be uploaded, or null.
   const refusal = (real) => localFileRefusal(real, home);
   const refuse = (p, real, why) => {
