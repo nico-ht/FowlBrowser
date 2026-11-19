@@ -36,7 +36,7 @@ export class HostClient extends EventEmitter {
     this._draining = false;
   }
 
-  async connect(label) {
+  async connect(label, session) {
     const token = fs.readFileSync(path.join(SOCKET_DIR, 'token'), 'utf8').trim();
     this._socket = net.connect(endpoint(this.socketPath));
     this._socket.on('data', (chunk) => this._onData(chunk));
@@ -56,7 +56,7 @@ export class HostClient extends EventEmitter {
     try {
       this._send({ method: 'host.auth', params: { token } });
       this.hello = await Promise.race([hello, failed]);
-      await Promise.race([this.request('client.hello', { label }), failed]);
+      await Promise.race([this.request('client.hello', { label, ...(session && { session }) }), failed]);
       await Promise.race([initialized, failed]);
     } finally {
       clearTimeout(timer);
@@ -81,6 +81,11 @@ export class HostClient extends EventEmitter {
 
   close() {
     this._socket?.destroy();
+  }
+
+  // A message that wants no answer.
+  notify(method, params = {}) {
+    if (!this.closed) this._send({ method, params });
   }
 
   _send(message) {
